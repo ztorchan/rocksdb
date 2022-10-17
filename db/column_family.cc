@@ -549,7 +549,11 @@ ColumnFamilyData::ColumnFamilyData(
           cf_options.table_factory->IsDeleteRangeSupported()),
       write_buffer_manager_(write_buffer_manager),
       mem_(nullptr),
+      hot_mem_(nullptr),
       imm_(ioptions_.min_write_buffer_number_to_merge,
+           ioptions_.max_write_buffer_number_to_maintain,
+           ioptions_.max_write_buffer_size_to_maintain),
+      hot_imm_(ioptions_.min_write_buffer_number_to_merge,
            ioptions_.max_write_buffer_number_to_maintain,
            ioptions_.max_write_buffer_size_to_maintain),
       super_version_(nullptr),
@@ -697,8 +701,12 @@ ColumnFamilyData::~ColumnFamilyData() {
   if (mem_ != nullptr) {
     delete mem_->Unref();
   }
+  if (hot_mem_ != nullptr) {
+    delete hot_mem_->Unref();
+  }
   autovector<MemTable*> to_delete;
   imm_.current()->Unref(&to_delete);
+  hot_imm_.current()->Unref(&to_delete);
   for (MemTable* m : to_delete) {
     delete m;
   }

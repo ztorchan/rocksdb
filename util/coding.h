@@ -118,6 +118,15 @@ inline const char* GetVarint32Ptr(const char* p,
   return GetVarint32PtrFallback(p, limit, value);
 }
 
+// ztorchan: label a bool as a character: 0xFF or 0x0
+inline void PutBool(std::string* dst, bool value) {
+  unsigned char buf = 0x0;
+  if (value) {
+    buf = 0xff;
+  }
+  dst->append(reinterpret_cast<char*>(&buf), sizeof(buf));
+}
+
 // Pull the last 8 bits and cast it to a character
 inline void PutFixed16(std::string* dst, uint16_t value) {
   if (port::kLittleEndian) {
@@ -255,6 +264,22 @@ inline int VarintLength(uint64_t v) {
     len++;
   }
   return len;
+}
+
+// ztorchan: get bool
+inline bool GetBool(Slice* input, bool* value) {
+  if(input->size() < sizeof(bool)) {
+    return false;
+  }
+  const char* p = input->data();
+  unsigned char result = *(reinterpret_cast<const unsigned char*>(p));
+  input->remove_prefix(sizeof(unsigned char));
+  if((result & 0xFF) != 0){
+    *value = true;
+  } else {
+    *value = false;
+  }
+  return true;
 }
 
 inline bool GetFixed64(Slice* input, uint64_t* value) {

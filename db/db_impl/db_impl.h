@@ -69,6 +69,8 @@
 #include "util/stop_watch.h"
 #include "util/thread_local.h"
 
+#include "rocksdb/hot_table.h"
+
 namespace ROCKSDB_NAMESPACE {
 
 class Arena;
@@ -2673,6 +2675,8 @@ class DBImpl : public DB {
   // seqno_time_mapping_ stores the sequence number to time mapping, it's not
   // thread safe, both read and write need db mutex hold.
   SeqnoToTimeMapping seqno_time_mapping_;
+
+  HotTable* hot_table_;
 };
 
 class GetWithTimestampReadCallback : public ReadCallback {

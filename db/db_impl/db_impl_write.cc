@@ -316,7 +316,8 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
           &trim_history_scheduler_,
           write_options.ignore_missing_column_families, 0 /*log_number*/, this,
           true /*concurrent_memtable_writes*/, seq_per_batch_, w.batch_cnt,
-          batch_per_txn_, write_options.memtable_insert_hint_per_batch);
+          batch_per_txn_, write_options.memtable_insert_hint_per_batch,
+          hot_table_);
 
       PERF_TIMER_START(write_pre_and_post_process_time);
     }
@@ -545,7 +546,7 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
             &flush_scheduler_, &trim_history_scheduler_,
             write_options.ignore_missing_column_families,
             0 /*recovery_log_number*/, this, parallel, seq_per_batch_,
-            batch_per_txn_);
+            batch_per_txn_, hot_table_);
       } else {
         write_group.last_sequence = last_sequence;
         write_thread_.LaunchParallelMemTableWriters(&write_group);
@@ -563,7 +564,8 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
               write_options.ignore_missing_column_families, 0 /*log_number*/,
               this, true /*concurrent_memtable_writes*/, seq_per_batch_,
               w.batch_cnt, batch_per_txn_,
-              write_options.memtable_insert_hint_per_batch);
+              write_options.memtable_insert_hint_per_batch,
+              hot_table_);
         }
       }
       if (seq_used != nullptr) {
@@ -783,7 +785,7 @@ Status DBImpl::PipelinedWriteImpl(const WriteOptions& write_options,
           memtable_write_group, w.sequence, column_family_memtables_.get(),
           &flush_scheduler_, &trim_history_scheduler_,
           write_options.ignore_missing_column_families, 0 /*log_number*/, this,
-          false /*concurrent_memtable_writes*/, seq_per_batch_, batch_per_txn_);
+          false /*concurrent_memtable_writes*/, seq_per_batch_, batch_per_txn_, hot_table_);
       versions_->SetLastSequence(memtable_write_group.last_sequence);
       write_thread_.ExitAsMemTableWriter(&w, memtable_write_group);
     }
@@ -802,7 +804,7 @@ Status DBImpl::PipelinedWriteImpl(const WriteOptions& write_options,
         &trim_history_scheduler_, write_options.ignore_missing_column_families,
         0 /*log_number*/, this, true /*concurrent_memtable_writes*/,
         false /*seq_per_batch*/, 0 /*batch_cnt*/, true /*batch_per_txn*/,
-        write_options.memtable_insert_hint_per_batch);
+        write_options.memtable_insert_hint_per_batch, hot_table_);
     if (write_thread_.CompleteParallelMemTableWriter(&w)) {
       MemTableInsertStatusCheck(w.status);
       versions_->SetLastSequence(w.write_group->last_sequence);
@@ -842,7 +844,7 @@ Status DBImpl::UnorderedWriteMemtable(const WriteOptions& write_options,
         &trim_history_scheduler_, write_options.ignore_missing_column_families,
         0 /*log_number*/, this, true /*concurrent_memtable_writes*/,
         seq_per_batch_, sub_batch_cnt, true /*batch_per_txn*/,
-        write_options.memtable_insert_hint_per_batch);
+        write_options.memtable_insert_hint_per_batch, hot_table_);
     if (write_options.disableWAL) {
       has_unpersisted_data_.store(true, std::memory_order_relaxed);
     }
@@ -1662,7 +1664,7 @@ Status DBImpl::HandleWriteBufferManagerFlush(WriteContext* write_context) {
   // no need to refcount because drop is happening in write thread, so can't
   // happen while we're in the write thread
   autovector<ColumnFamilyData*> cfds;
-  if (immutable_db_options_.atomic_flush) {
+  if (immutable_db_options_.atomic_flush) {     // ztorchan：atomic_flush模式下，可以选择多个列族进行flush；否则，选择MemTable序号最小的列族进行flush
     SelectColumnFamiliesForAtomicFlush(&cfds);
   } else {
     ColumnFamilyData* cfd_picked = nullptr;
@@ -1703,7 +1705,7 @@ Status DBImpl::HandleWriteBufferManagerFlush(WriteContext* write_context) {
   if (two_write_queues_) {
     nonmem_write_thread_.EnterUnbatched(&nonmem_w, &mutex_);
   }
-  for (const auto cfd : cfds) {
+  for (const auto cfd : cfds) {     // ztorchan：调用SwitchMemtable为选中的CFD切换MemTable，注意在过程中需要调用Ref和UnRef
     if (cfd->mem()->IsEmpty()) {
       continue;
     }

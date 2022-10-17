@@ -21,6 +21,7 @@
 #include "rocksdb/write_batch.h"
 #include "util/autovector.h"
 #include "util/cast_util.h"
+#include "rocksdb/hot_table.h"
 
 namespace ROCKSDB_NAMESPACE {
 
@@ -182,10 +183,10 @@ class WriteBatchInternal {
   static Status InsertInto(
       WriteThread::WriteGroup& write_group, SequenceNumber sequence,
       ColumnFamilyMemTables* memtables, FlushScheduler* flush_scheduler,
-      TrimHistoryScheduler* trim_history_scheduler,
+      TrimHistoryScheduler* trim_history_scheduler, 
       bool ignore_missing_column_families = false, uint64_t log_number = 0,
       DB* db = nullptr, bool concurrent_memtable_writes = false,
-      bool seq_per_batch = false, bool batch_per_txn = true);
+      bool seq_per_batch = false, bool batch_per_txn = true, HotTable* hot_table = nullptr);
 
   // Convenience form of InsertInto when you have only one batch
   // next_seq returns the seq after last sequence number used in MemTable insert
@@ -196,18 +197,19 @@ class WriteBatchInternal {
       bool ignore_missing_column_families = false, uint64_t log_number = 0,
       DB* db = nullptr, bool concurrent_memtable_writes = false,
       SequenceNumber* next_seq = nullptr, bool* has_valid_writes = nullptr,
-      bool seq_per_batch = false, bool batch_per_txn = true);
+      bool seq_per_batch = false, bool batch_per_txn = true, HotTable* hot_table = nullptr);
 
   static Status InsertInto(WriteThread::Writer* writer, SequenceNumber sequence,
                            ColumnFamilyMemTables* memtables,
-                           FlushScheduler* flush_scheduler,
+                           FlushScheduler* flush_scheduler, 
                            TrimHistoryScheduler* trim_history_scheduler,
                            bool ignore_missing_column_families = false,
                            uint64_t log_number = 0, DB* db = nullptr,
                            bool concurrent_memtable_writes = false,
                            bool seq_per_batch = false, size_t batch_cnt = 0,
                            bool batch_per_txn = true,
-                           bool hint_per_batch = false);
+                           bool hint_per_batch = false,
+                           HotTable* hot_table = nullptr);
 
   // Appends src write batch to dst write batch and updates count in dst
   // write batch. Returns OK if the append is successful. Checks number of

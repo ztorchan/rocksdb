@@ -69,6 +69,7 @@
 #include "util/duplicate_detector.h"
 #include "util/string_util.h"
 
+#include "rocksdb/hot_table.h"
 namespace ROCKSDB_NAMESPACE {
 
 // anon namespace for file-local types
@@ -1767,6 +1768,8 @@ class MemTableInserter : public WriteBatch::Handler {
   DupDetector       duplicate_detector_;
   bool              dup_dectector_on_;
 
+  HotTable* hot_table_;   // ztorchan: add hot table
+
   bool hint_per_batch_;
   bool hint_created_;
   // Hints for this batch
@@ -1842,7 +1845,7 @@ class MemTableInserter : public WriteBatch::Handler {
                    bool concurrent_memtable_writes,
                    const WriteBatch::ProtectionInfo* prot_info,
                    bool* has_valid_writes = nullptr, bool seq_per_batch = false,
-                   bool batch_per_txn = true, bool hint_per_batch = false)
+                   bool batch_per_txn = true, bool hint_per_batch = false, HotTable* hot_table = nullptr)
       : sequence_(_sequence),
         cf_mems_(cf_mems),
         flush_scheduler_(flush_scheduler),
@@ -1869,6 +1872,7 @@ class MemTableInserter : public WriteBatch::Handler {
         unprepared_batch_(false),
         duplicate_detector_(),
         dup_dectector_on_(false),
+        hot_table_(hot_table),
         hint_per_batch_(hint_per_batch),
         hint_created_(false) {
     assert(cf_mems_);
@@ -2856,12 +2860,12 @@ Status WriteBatchInternal::InsertInto(
     ColumnFamilyMemTables* memtables, FlushScheduler* flush_scheduler,
     TrimHistoryScheduler* trim_history_scheduler,
     bool ignore_missing_column_families, uint64_t recovery_log_number, DB* db,
-    bool concurrent_memtable_writes, bool seq_per_batch, bool batch_per_txn) {
+    bool concurrent_memtable_writes, bool seq_per_batch, bool batch_per_txn, HotTable* hot_table) {
   MemTableInserter inserter(
       sequence, memtables, flush_scheduler, trim_history_scheduler,
       ignore_missing_column_families, recovery_log_number, db,
       concurrent_memtable_writes, nullptr /* prot_info */,
-      nullptr /*has_valid_writes*/, seq_per_batch, batch_per_txn);
+      nullptr /*has_valid_writes*/, seq_per_batch, batch_per_txn, hot_table);
   for (auto w : write_group) {
     if (w->CallbackFailed()) {
       continue;
@@ -2891,7 +2895,7 @@ Status WriteBatchInternal::InsertInto(
     TrimHistoryScheduler* trim_history_scheduler,
     bool ignore_missing_column_families, uint64_t log_number, DB* db,
     bool concurrent_memtable_writes, bool seq_per_batch, size_t batch_cnt,
-    bool batch_per_txn, bool hint_per_batch) {
+    bool batch_per_txn, bool hint_per_batch, HotTable* hot_table) {
 #ifdef NDEBUG
   (void)batch_cnt;
 #endif
@@ -2901,7 +2905,8 @@ Status WriteBatchInternal::InsertInto(
                             ignore_missing_column_families, log_number, db,
                             concurrent_memtable_writes, nullptr /* prot_info */,
                             nullptr /*has_valid_writes*/, seq_per_batch,
-                            batch_per_txn, hint_per_batch);
+                            batch_per_txn, hint_per_batch,
+                            hot_table);
   SetSequence(writer->batch, sequence);
   inserter.set_log_number_ref(writer->log_ref);
   inserter.set_prot_info(writer->batch->prot_info_.get());
@@ -2916,16 +2921,16 @@ Status WriteBatchInternal::InsertInto(
 
 Status WriteBatchInternal::InsertInto(
     const WriteBatch* batch, ColumnFamilyMemTables* memtables,
-    FlushScheduler* flush_scheduler,
+    FlushScheduler* flush_scheduler, 
     TrimHistoryScheduler* trim_history_scheduler,
     bool ignore_missing_column_families, uint64_t log_number, DB* db,
     bool concurrent_memtable_writes, SequenceNumber* next_seq,
-    bool* has_valid_writes, bool seq_per_batch, bool batch_per_txn) {
+    bool* has_valid_writes, bool seq_per_batch, bool batch_per_txn, HotTable* hot_table) {
   MemTableInserter inserter(Sequence(batch), memtables, flush_scheduler,
                             trim_history_scheduler,
                             ignore_missing_column_families, log_number, db,
                             concurrent_memtable_writes, batch->prot_info_.get(),
-                            has_valid_writes, seq_per_batch, batch_per_txn);
+                            has_valid_writes, seq_per_batch, batch_per_txn, hot_table);
   Status s = batch->Iterate(&inserter);
   if (next_seq != nullptr) {
     *next_seq = inserter.sequence();

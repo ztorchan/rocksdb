@@ -348,7 +348,9 @@ class ColumnFamilyData {
   InternalStats* internal_stats() { return internal_stats_.get(); }
 
   MemTableList* imm() { return &imm_; }
+  MemTableList* hot_imm() { return &hot_imm_; }
   MemTable* mem() { return mem_; }
+  MemTable* hot_mem() {return hot_mem_; }
 
   bool IsEmpty() {
     return mem()->GetFirstSequenceNumber() == 0 && imm()->NumNotFlushed() == 0;
@@ -574,7 +576,9 @@ class ColumnFamilyData {
   WriteBufferManager* write_buffer_manager_;
 
   MemTable* mem_;
+  MemTable* hot_mem_;
   MemTableList imm_;
+  MemTableList hot_imm_;
   SuperVersion* super_version_;
 
   // An ordinal representing the current SuperVersion. Updated by
