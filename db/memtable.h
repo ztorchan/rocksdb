@@ -659,6 +659,13 @@ class MemTable {
   void UpdateEntryChecksum(const ProtectionInfoKVOS64* kv_prot_info,
                            const Slice& key, const Slice& value, ValueType type,
                            SequenceNumber s, char* checksum_ptr);
+
+private:
+  bool is_hot = false;
+
+public:
+  inline void SetHot() { is_hot = true; }
+  inline bool IsHot() { return is_hot; }
 };
 
 extern const char* EncodeKey(std::string* scratch, const Slice& target);

@@ -40,8 +40,12 @@ static std::string PrintContents(WriteBatch* b,
   MemTable* mem = new MemTable(cmp, ioptions, MutableCFOptions(options), &wb,
                                kMaxSequenceNumber, 0 /* column_family_id */);
   mem->Ref();
+  MemTable* hot_mem = new MemTable(cmp, ioptions, MutableCFOptions(options), &wb,
+                               kMaxSequenceNumber, 0 /* column_family_id */);
+  hot_mem->SetHot();
+  hot_mem->Ref();
   std::string state;
-  ColumnFamilyMemTablesDefault cf_mems_default(mem);
+  ColumnFamilyMemTablesDefault cf_mems_default(mem, hot_mem);
   Status s =
       WriteBatchInternal::InsertInto(b, &cf_mems_default, nullptr, nullptr);
   uint32_t count = 0;

@@ -113,14 +113,15 @@
 - **关于Version和SuperVersion**
   - ...
 ## TODO
-- 继续修改`Put`相关的函数，添加上标志是否为热数据的`is_hot`。
-- 查看涉及`ColumnFamilyData`的`mem_`和`imm_`的操作，为`hot_mem_`和`hot_imm_`也要添加同样的。
-- `Version`和`SuperVersion`
-- 
+- 修改`PutCFImpl`及其内部相关的函数
+- 对`ColumnFamilyData`内部的所有函数看一遍，重点关注与MemTable和LogNumber有关的函数。
+- 开始对查询部分的改动。
+- 开始对Flush部分开始改动。
+- 开始查看Compaction相关的源码。
 ## Change Log
 - **2022.10.15**：开始记录CHANGE_LOG.md。尝试为编解码和`Put`相关的函数添加了bool变量`is_hot`。但也从而引出了一系列问题。
 - **2022.10.16**：在`DBImpl`层判断key是否为热数据不是一个好方法，会造成大量的接口改动。不再将其编码进入`WriteBatch`，而是传递`DBImpl`的热数据表指针，由`MemTableInserter`做热数据判断。
-- **2022.10.17**；梳理了一下关于SwitchMemTable和Flush的流程。
+- **2022.10.17**；梳理了一下关于SwitchMemTable和Flush的流程。开始对写入过程的改动，明天应该能完成。
 ## 存在问题
 - RocksDB的版本控制机制`Version`和`SuperVersion`等暂且还没完全弄清楚，可能也会影响到项目改动。
 - Compaction还没开始看。

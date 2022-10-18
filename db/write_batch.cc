@@ -1934,7 +1934,7 @@ class MemTableInserter : public WriteBatch::Handler {
     }
   }
 
-  bool SeekToColumnFamily(uint32_t column_family_id, Status* s) {
+  bool SeekToColumnFamily(uint32_t column_family_id, Status* s, bool is_hot = false) {
     // If we are in a concurrent mode, it is the caller's responsibility
     // to clone the original ColumnFamilyMemTables so that each thread
     // has its own instance.  Otherwise, it must be guaranteed that there
@@ -1984,8 +1984,10 @@ class MemTableInserter : public WriteBatch::Handler {
       // else insert the values to the memtable right away
     }
 
+    bool is_hot = hot_table_->IsHotKey(key);
+
     Status ret_status;
-    if (UNLIKELY(!SeekToColumnFamily(column_family_id, &ret_status))) {
+    if (UNLIKELY(!SeekToColumnFamily(column_family_id, &ret_status, is_hot))) {
       if (ret_status.ok() && rebuilding_trx_ != nullptr) {
         assert(!write_after_commit_);
         // The CF is probably flushed and hence no need for insert but we still
@@ -2003,7 +2005,7 @@ class MemTableInserter : public WriteBatch::Handler {
     }
     assert(ret_status.ok());
 
-    MemTable* mem = cf_mems_->GetMemTable();
+    MemTable* mem = is_hot ? cf_mems_->GetHotMemTable() : cf_mems_->GetMemTable();
     auto* moptions = mem->GetImmutableMemTableOptions();
     // inplace_update_support is inconsistent with snapshots, and therefore with
     // any kind of transactions including the ones that use seq_per_batch
@@ -2103,8 +2105,10 @@ class MemTableInserter : public WriteBatch::Handler {
       const bool kBatchBoundary = true;
       MaybeAdvanceSeq(kBatchBoundary);
     } else if (ret_status.ok()) {
+      hot_table_->AddKey(key);
       MaybeAdvanceSeq();
-      CheckMemtableFull();
+      if (!is_hot) { CheckMemtableFull(); }
+      else { CheckHotMemtableFull(); }
     }
     // optimize for non-recovery mode
     // If `ret_status` is `TryAgain` then the next (successful) try will add
@@ -2609,6 +2613,46 @@ class MemTableInserter : public WriteBatch::Handler {
                       imm->MemoryAllocatedBytesExcludingLast() >=
                   size_to_maintain &&
               imm->MarkTrimHistoryNeeded()) {
+            trim_history_scheduler_->ScheduleWork(cfd);
+          }
+        }
+      }
+    }
+  }
+
+    void CheckHotMemtableFull() {
+    if (flush_scheduler_ != nullptr) {
+      auto* cfd = cf_mems_->current();
+      assert(cfd != nullptr);
+      if (cfd->hot_mem()->ShouldScheduleFlush() &&
+          cfd->hot_mem()->MarkFlushScheduled()) {
+        // MarkFlushScheduled only returns true if we are the one that
+        // should take action, so no need to dedup further
+        flush_scheduler_->ScheduleWork(cfd);
+      }
+    }
+    // check if memtable_list size exceeds max_write_buffer_size_to_maintain
+    if (trim_history_scheduler_ != nullptr) {
+      auto* cfd = cf_mems_->current();
+
+      assert(cfd);
+      assert(cfd->ioptions());
+
+      const size_t size_to_maintain = static_cast<size_t>(
+          cfd->ioptions()->max_write_buffer_size_to_maintain);
+
+      if (size_to_maintain > 0) {
+        MemTableList* const hot_imm = cfd->hot_imm();
+        assert(hot_imm);
+
+        if (hot_imm->HasHistory()) {
+          const MemTable* const hot_mem = cfd->hot_mem();
+          assert(hot_mem);
+
+          if (hot_mem->MemoryAllocatedBytes() +
+                      hot_imm->MemoryAllocatedBytesExcludingLast() >=
+                  size_to_maintain &&
+              hot_imm->MarkTrimHistoryNeeded()) {
             trim_history_scheduler_->ScheduleWork(cfd);
           }
         }

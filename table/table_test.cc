@@ -4147,6 +4147,10 @@ class MemTableTest : public testing::Test {
     memtable_ = new MemTable(cmp, ioptions, MutableCFOptions(options_), wb_,
                              kMaxSequenceNumber, 0 /* column_family_id */);
     memtable_->Ref();
+    hot_memtable_ = new MemTable(cmp, ioptions, MutableCFOptions(options_), wb_,
+                             kMaxSequenceNumber, 0 /* column_family_id */);
+    hot_memtable_->SetHot();
+    hot_memtable_->Ref();
   }
 
   ~MemTableTest() {
@@ -4156,8 +4160,11 @@ class MemTableTest : public testing::Test {
 
   MemTable* GetMemTable() { return memtable_; }
 
+  MemTable* GetHotMemTable() { return hot_memtable_; }
+
  private:
   MemTable* memtable_;
+  MemTable* hot_memtable_;
   Options options_;
   WriteBufferManager* wb_;
 };
@@ -4171,7 +4178,7 @@ TEST_F(MemTableTest, Simple) {
   ASSERT_OK(batch.Put(std::string("largekey"), std::string("vlarge")));
   ASSERT_OK(batch.DeleteRange(std::string("chi"), std::string("xigua")));
   ASSERT_OK(batch.DeleteRange(std::string("begin"), std::string("end")));
-  ColumnFamilyMemTablesDefault cf_mems_default(GetMemTable());
+  ColumnFamilyMemTablesDefault cf_mems_default(GetMemTable(), GetHotMemTable());
   ASSERT_TRUE(
       WriteBatchInternal::InsertInto(&batch, &cf_mems_default, nullptr, nullptr)
           .ok());

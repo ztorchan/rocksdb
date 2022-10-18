@@ -51,8 +51,14 @@ jbyteArray Java_org_rocksdb_WriteBatchTest_getContents(JNIEnv* env,
       ROCKSDB_NAMESPACE::MutableCFOptions(options), &wb,
       ROCKSDB_NAMESPACE::kMaxSequenceNumber, 0 /* column_family_id */);
   mem->Ref();
+  ROCKSDB_NAMESPACE::MemTable* hot_mem = new ROCKSDB_NAMESPACE::MemTable(
+      cmp, ROCKSDB_NAMESPACE::ImmutableOptions(options),
+      ROCKSDB_NAMESPACE::MutableCFOptions(options), &wb,
+      ROCKSDB_NAMESPACE::kMaxSequenceNumber, 0 /* column_family_id */);
+  hot_mem->SetHot();
+  hot_mem->Ref();
   std::string state;
-  ROCKSDB_NAMESPACE::ColumnFamilyMemTablesDefault cf_mems_default(mem);
+  ROCKSDB_NAMESPACE::ColumnFamilyMemTablesDefault cf_mems_default(mem, hot_mem);
   ROCKSDB_NAMESPACE::Status s =
       ROCKSDB_NAMESPACE::WriteBatchInternal::InsertInto(b, &cf_mems_default,
                                                         nullptr, nullptr);

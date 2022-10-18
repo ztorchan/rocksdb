@@ -1119,6 +1119,14 @@ MemTable* ColumnFamilyData::ConstructNewMemtable(
                       write_buffer_manager_, earliest_seq, id_);
 }
 
+MemTable* ColumnFamilyData::ComstructNewHotMemtable(
+    const MutableCFOptions& mutable_cf_options, SequenceNumber earliest_seq) {
+  MemTable* new_hot_mem = new MemTable(internal_comparator_, ioptions_, mutable_cf_options,
+                                       write_buffer_manager_, earliest_seq, id_);
+  new_hot_mem->SetHot();
+  return new_hot_mem;
+}
+
 void ColumnFamilyData::CreateNewMemtable(
     const MutableCFOptions& mutable_cf_options, SequenceNumber earliest_seq) {
   if (mem_ != nullptr) {
@@ -1126,6 +1134,12 @@ void ColumnFamilyData::CreateNewMemtable(
   }
   SetMemtable(ConstructNewMemtable(mutable_cf_options, earliest_seq));
   mem_->Ref();
+  // ztorchan: add hot memtable
+  if (hot_mem_ != nullptr) {
+    delete hot_mem_->Unref();
+  }
+  SetHotMemtable(ComstructNewHotMemtable(mutable_cf_options, earliest_seq));
+  hot_mem_->Ref();
 }
 
 bool ColumnFamilyData::NeedsCompaction() const {
@@ -1664,6 +1678,11 @@ uint64_t ColumnFamilyMemTablesImpl::GetLogNumber() const {
 MemTable* ColumnFamilyMemTablesImpl::GetMemTable() const {
   assert(current_ != nullptr);
   return current_->mem();
+}
+
+MemTable* ColumnFamilyMemTablesImpl::GetHotMemTable() const {
+  assert(current_ != nullptr);
+  return current_->hot_mem();
 }
 
 ColumnFamilyHandle* ColumnFamilyMemTablesImpl::GetColumnFamilyHandle() {

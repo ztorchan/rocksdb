@@ -298,7 +298,7 @@ DBImpl::DBImpl(const DBOptions& options, const std::string& dbname,
   }
 
   if (initial_db_options_.hot_table_threhold != 0) {
-    hot_table_ = new HotTable(initial_db_options_.hot_table_threhold);
+    hot_table_ = new HotTable(initial_db_options_.hot_table_threhold, initial_db_options_.cnter_per_key);
     assert(hot_table_ != nullptr);
   }
 }

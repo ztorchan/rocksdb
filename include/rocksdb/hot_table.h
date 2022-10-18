@@ -11,7 +11,7 @@ namespace ROCKSDB_NAMESPACE{
 
 class CountingBloomFilter {
  public:
-  explicit CountingBloomFilter(int cnter_per_key) : cnter_per_key_(cnter_per_key){
+  explicit CountingBloomFilter(uint32_t cnter_per_key) : cnter_per_key_(cnter_per_key){
     //暂时不考虑像bloom那样用0.69缩减空间
     capacity_ = 100000; //at most 10^7 keys;
   }
@@ -72,7 +72,7 @@ class CountingBloomFilter {
     }
   }
 
-  int KeyCounter(const Slice& key){
+  uint32_t KeyCounter(const Slice& key){
     const size_t len = filter_.size();
     if (len < 2) return 0;
 
@@ -82,16 +82,16 @@ class CountingBloomFilter {
     uint32_t h = BloomHash(key);
     const uint32_t delta = (h >> 17) | (h << 15);  // Rotate right 17 bits
     
-    int smallest = 16;
+    uint8_t smallest = 16;
     for(uint32_t j = 0; j < cnter_per_key_; j++){
       const uint32_t bit_pos = h % bits;
       const uint32_t cnter_pos = bit_pos / 4;
       const uint32_t byte_pos = bit_pos / 8;
       uint8_t cnt = 0;
       if (cnter_pos % 2 == 0) { //low 4 bits
-        cnt = (int)(array[byte_pos] & 0xF);// read counter
+        cnt = (uint8_t)(array[byte_pos] & 0xF);// read counter
       } else {
-        cnt = (int)(array[byte_pos] & 0xF0) >> 4;
+        cnt = (uint8_t)(array[byte_pos] & 0xF0) >> 4;
       }
       if (cnt < smallest){
         smallest = cnt;
@@ -99,10 +99,8 @@ class CountingBloomFilter {
       }
       h += delta;
     }
-    return smallest;
+    return (uint32_t)smallest;
   }
-
-
 
  private:
   uint32_t cnter_per_key_;
@@ -117,39 +115,33 @@ class CountingBloomFilter {
 */
 class HotTable {
 public:
-  HotTable(uint32_t thred) : table_(), thred_(thred) {}
-  HotTable(const HotTable&) = delete;
-  ~HotTable() {}
+  explicit HotTable(uint32_t thred, uint32_t cnter_per_key) : 
+                    cnter_per_key_(cnter_per_key), thred_(thred), cbf_(cnter_per_key) {
+    cbf_.InitCBF();
+  }
+  ~HotTable(){}
 
-  // Add() increase the counter of given key. 
-  // If the key counter doesn't exist, set table[key] == 1.
-  inline void Add(const Slice& key) {
-    table_[key.ToString()]++;
+  void AddKey(const Slice& key) {
+    cbf_.AddKey(key);
   }
 
-  // Remove a key counter.
-  inline void Remove(const Slice& key) {
-    table_.erase(key.ToString());
+  uint32_t KeyCounter(const Slice& key) {
+    return cbf_.KeyCounter(key);
   }
 
-  // Return if a key is hot.
-  inline bool is_hot(const Slice& key) {
-    return table_[key.ToString()] >= thred_;
+  bool IsHotKey(const Slice& key) {
+    return cbf_.KeyCounter(key) >= thred_;
   }
 
-  // Return table size.
-  inline uint32_t size() {
-    return (uint32_t)table_.size();
-  }
-  
-  // Clear HotTable
-  inline void clear() {
-    table_.clear();
+  void clear() {
+    cbf_ = CountingBloomFilter(cnter_per_key_);
+    cbf_.InitCBF();
   }
 
 private:
-  std::unordered_map<std::string, uint32_t> table_;
+  uint32_t cnter_per_key_;
   uint32_t thred_;
+  CountingBloomFilter cbf_;
 };
 
 }

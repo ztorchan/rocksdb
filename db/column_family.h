@@ -353,7 +353,8 @@ class ColumnFamilyData {
   MemTable* hot_mem() {return hot_mem_; }
 
   bool IsEmpty() {
-    return mem()->GetFirstSequenceNumber() == 0 && imm()->NumNotFlushed() == 0;
+    return mem()->GetFirstSequenceNumber() == 0 && imm()->NumNotFlushed() == 0 
+           && hot_mem()->GetFirstSequenceNumber() == 0 && hot_imm()->NumNotFlushed() == 0;
   }
 
   Version* current() { return current_; }
@@ -368,6 +369,11 @@ class ColumnFamilyData {
     new_mem->SetID(memtable_id);
     mem_ = new_mem;
   }
+  void SetHotMemtable(MemTable* new_mem) {
+    uint64_t memtable_id = last_memtable_id_.fetch_add(1) + 1;
+    new_mem->SetID(memtable_id);
+    hot_mem_ = new_mem;
+  }
 
   // calculate the oldest log needed for the durability of this column family
   uint64_t OldestLogToKeep();
@@ -375,6 +381,8 @@ class ColumnFamilyData {
   // See Memtable constructor for explanation of earliest_seq param.
   MemTable* ConstructNewMemtable(const MutableCFOptions& mutable_cf_options,
                                  SequenceNumber earliest_seq);
+  MemTable* ComstructNewHotMemtable(const MutableCFOptions& mutable_cf_options,
+                                    SequenceNumber earliest_seq);
   void CreateNewMemtable(const MutableCFOptions& mutable_cf_options,
                          SequenceNumber earliest_seq);
 
@@ -824,6 +832,8 @@ class ColumnFamilyMemTablesImpl : public ColumnFamilyMemTables {
   // REQUIRES: use this function of DBImpl::column_family_memtables_ should be
   //           under a DB mutex OR from a write thread
   virtual MemTable* GetMemTable() const override;
+
+  virtual MemTable* GetHotMemTable() const override;
 
   // Returns column family handle for the selected column family
   // REQUIRES: use this function of DBImpl::column_family_memtables_ should be

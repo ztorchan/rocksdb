@@ -38,14 +38,15 @@ class ColumnFamilyMemTables {
   // been processed)
   virtual uint64_t GetLogNumber() const = 0;
   virtual MemTable* GetMemTable() const = 0;
+  virtual MemTable* GetHotMemTable() const = 0;
   virtual ColumnFamilyHandle* GetColumnFamilyHandle() = 0;
   virtual ColumnFamilyData* current() { return nullptr; }
 };
 
 class ColumnFamilyMemTablesDefault : public ColumnFamilyMemTables {
  public:
-  explicit ColumnFamilyMemTablesDefault(MemTable* mem)
-      : ok_(false), mem_(mem) {}
+  explicit ColumnFamilyMemTablesDefault(MemTable* mem, MemTable* hot_mem)
+      : ok_(false), mem_(mem), hot_mem_(hot_mem) {}
 
   bool Seek(uint32_t column_family_id) override {
     ok_ = (column_family_id == 0);
@@ -59,11 +60,17 @@ class ColumnFamilyMemTablesDefault : public ColumnFamilyMemTables {
     return mem_;
   }
 
+  MemTable* GetHotMemTable() const override {
+    assert(ok_);
+    return hot_mem_;
+  }
+
   ColumnFamilyHandle* GetColumnFamilyHandle() override { return nullptr; }
 
  private:
   bool ok_;
   MemTable* mem_;
+  MemTable* hot_mem_;
 };
 
 struct WriteBatch::ProtectionInfo {
