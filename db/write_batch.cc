@@ -1967,7 +1967,11 @@ class MemTableInserter : public WriteBatch::Handler {
     }
 
     if (log_number_ref_ > 0) {
-      cf_mems_->GetMemTable()->RefLogContainingPrepSection(log_number_ref_);
+      if (!is_hot) {
+        cf_mems_->GetMemTable()->RefLogContainingPrepSection(log_number_ref_);
+      } else {
+        cf_mems_->GetHotMemTable()->RefLogContainingPrepSection(log_number_ref_);
+      }
     }
 
     return true;
@@ -2107,8 +2111,7 @@ class MemTableInserter : public WriteBatch::Handler {
     } else if (ret_status.ok()) {
       hot_table_->AddKey(key);
       MaybeAdvanceSeq();
-      if (!is_hot) { CheckMemtableFull(); }
-      else { CheckHotMemtableFull(); }
+      CheckMemtableFull();
     }
     // optimize for non-recovery mode
     // If `ret_status` is `TryAgain` then the next (successful) try will add
@@ -2584,8 +2587,8 @@ class MemTableInserter : public WriteBatch::Handler {
     if (flush_scheduler_ != nullptr) {
       auto* cfd = cf_mems_->current();
       assert(cfd != nullptr);
-      if (cfd->mem()->ShouldScheduleFlush() &&
-          cfd->mem()->MarkFlushScheduled()) {
+      if (cfd->mem()->ShouldScheduleFlush() && cfd->mem()->MarkFlushScheduled() 
+          || cfd->hot_mem()->ShouldScheduleFlush() && cfd->hot_mem()->MarkFlushScheduled()) {
         // MarkFlushScheduled only returns true if we are the one that
         // should take action, so no need to dedup further
         flush_scheduler_->ScheduleWork(cfd);
@@ -2606,53 +2609,12 @@ class MemTableInserter : public WriteBatch::Handler {
         assert(imm);
 
         if (imm->HasHistory()) {
-          const MemTable* const mem = cfd->mem();
-          assert(mem);
-
-          if (mem->MemoryAllocatedBytes() +
+          assert(cfd->mem());
+          assert(cfd->hot_mem());
+          if (cfd->mem()->MemoryAllocatedBytes() + cfd->hot_mem()->MemoryAllocatedBytes() +
                       imm->MemoryAllocatedBytesExcludingLast() >=
                   size_to_maintain &&
               imm->MarkTrimHistoryNeeded()) {
-            trim_history_scheduler_->ScheduleWork(cfd);
-          }
-        }
-      }
-    }
-  }
-
-    void CheckHotMemtableFull() {
-    if (flush_scheduler_ != nullptr) {
-      auto* cfd = cf_mems_->current();
-      assert(cfd != nullptr);
-      if (cfd->hot_mem()->ShouldScheduleFlush() &&
-          cfd->hot_mem()->MarkFlushScheduled()) {
-        // MarkFlushScheduled only returns true if we are the one that
-        // should take action, so no need to dedup further
-        flush_scheduler_->ScheduleWork(cfd);
-      }
-    }
-    // check if memtable_list size exceeds max_write_buffer_size_to_maintain
-    if (trim_history_scheduler_ != nullptr) {
-      auto* cfd = cf_mems_->current();
-
-      assert(cfd);
-      assert(cfd->ioptions());
-
-      const size_t size_to_maintain = static_cast<size_t>(
-          cfd->ioptions()->max_write_buffer_size_to_maintain);
-
-      if (size_to_maintain > 0) {
-        MemTableList* const hot_imm = cfd->hot_imm();
-        assert(hot_imm);
-
-        if (hot_imm->HasHistory()) {
-          const MemTable* const hot_mem = cfd->hot_mem();
-          assert(hot_mem);
-
-          if (hot_mem->MemoryAllocatedBytes() +
-                      hot_imm->MemoryAllocatedBytesExcludingLast() >=
-                  size_to_maintain &&
-              hot_imm->MarkTrimHistoryNeeded()) {
             trim_history_scheduler_->ScheduleWork(cfd);
           }
         }

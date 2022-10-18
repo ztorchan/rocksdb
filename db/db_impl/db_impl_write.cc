@@ -1620,6 +1620,7 @@ Status DBImpl::SwitchWAL(WriteContext* write_context) {
   for (const auto cfd : cfds) {
     cfd->Ref();
     status = SwitchMemtable(cfd, write_context);
+    if (status.ok())  status = SwitchHotMemtable(cfd, write_context);
     cfd->UnrefAndTryDelete();
     if (!status.ok()) {
       break;
@@ -2223,6 +2224,221 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
   cfd->imm()->Add(cfd->mem(), &context->memtables_to_free_);
   new_mem->Ref();
   cfd->SetMemtable(new_mem);
+  InstallSuperVersionAndScheduleWork(cfd, &context->superversion_context,
+                                     mutable_cf_options);
+
+#ifndef ROCKSDB_LITE
+  // Notify client that memtable is sealed, now that we have successfully
+  // installed a new memtable
+  NotifyOnMemTableSealed(cfd, memtable_info);
+#endif  // ROCKSDB_LITE
+  // It is possible that we got here without checking the value of i_os, but
+  // that is okay.  If we did, it most likely means that s was already an error.
+  // In any case, ignore any unchecked error for i_os here.
+  io_s.PermitUncheckedError();
+  return s;
+}
+
+// REQUIRES: mutex_ is held
+// REQUIRES: this thread is currently at the front of the writer queue
+// REQUIRES: this thread is currently at the front of the 2nd writer queue if
+// two_write_queues_ is true (This is to simplify the reasoning.)
+Status DBImpl::SwitchHotMemtable(ColumnFamilyData* cfd, WriteContext* context) {
+  mutex_.AssertHeld();
+  log::Writer* new_log = nullptr;
+  MemTable* new_mem = nullptr;
+  IOStatus io_s;
+
+  // Recoverable state is persisted in WAL. After memtable switch, WAL might
+  // be deleted, so we write the state to memtable to be persisted as well.
+  Status s = WriteRecoverableState();
+  if (!s.ok()) {
+    return s;
+  }
+
+  // Attempt to switch to a new memtable and trigger flush of old.
+  // Do this without holding the dbmutex lock.
+  assert(versions_->prev_log_number() == 0);
+  if (two_write_queues_) {
+    log_write_mutex_.Lock();
+  }
+  bool creating_new_log = !log_empty_;
+  if (two_write_queues_) {
+    log_write_mutex_.Unlock();
+  }
+  uint64_t recycle_log_number = 0;
+  if (creating_new_log && immutable_db_options_.recycle_log_file_num &&
+      !log_recycle_files_.empty()) {
+    recycle_log_number = log_recycle_files_.front();
+  }
+  uint64_t new_log_number =
+      creating_new_log ? versions_->NewFileNumber() : logfile_number_;
+  const MutableCFOptions mutable_cf_options = *cfd->GetLatestMutableCFOptions();
+
+  // Set memtable_info for memtable sealed callback
+#ifndef ROCKSDB_LITE
+  MemTableInfo memtable_info;
+  memtable_info.cf_name = cfd->GetName();
+  memtable_info.first_seqno = cfd->hot_mem()->GetFirstSequenceNumber();
+  memtable_info.earliest_seqno = cfd->hot_mem()->GetEarliestSequenceNumber();
+  memtable_info.num_entries = cfd->hot_mem()->num_entries();
+  memtable_info.num_deletes = cfd->hot_mem()->num_deletes();
+#endif  // ROCKSDB_LITE
+  // Log this later after lock release. It may be outdated, e.g., if background
+  // flush happens before logging, but that should be ok.
+  int num_imm_unflushed = cfd->imm()->NumNotFlushed();
+  const auto preallocate_block_size =
+      GetWalPreallocateBlockSize(mutable_cf_options.write_buffer_size);
+  mutex_.Unlock();
+  if (creating_new_log) {
+    // TODO: Write buffer size passed in should be max of all CF's instead
+    // of mutable_cf_options.write_buffer_size.
+    io_s = CreateWAL(new_log_number, recycle_log_number, preallocate_block_size,
+                     &new_log);
+    if (s.ok()) {
+      s = io_s;
+    }
+  }
+  if (s.ok()) {
+    SequenceNumber seq = versions_->LastSequence();
+    new_mem = cfd->ComstructNewHotMemtable(mutable_cf_options, seq);
+    context->superversion_context.NewSuperVersion();
+  }
+  ROCKS_LOG_INFO(immutable_db_options_.info_log,
+                 "[%s] New memtable created with log file: #%" PRIu64
+                 ". Immutable memtables: %d.\n",
+                 cfd->GetName().c_str(), new_log_number, num_imm_unflushed);
+  // There should be no concurrent write as the thread is at the front of
+  // writer queue
+  cfd->hot_mem()->ConstructFragmentedRangeTombstones();
+
+  mutex_.Lock();
+  if (recycle_log_number != 0) {
+    // Since renaming the file is done outside DB mutex, we need to ensure
+    // concurrent full purges don't delete the file while we're recycling it.
+    // To achieve that we hold the old log number in the recyclable list until
+    // after it has been renamed.
+    assert(log_recycle_files_.front() == recycle_log_number);
+    log_recycle_files_.pop_front();
+  }
+  if (s.ok() && creating_new_log) {
+    InstrumentedMutexLock l(&log_write_mutex_);
+    assert(new_log != nullptr);
+    if (!logs_.empty()) {
+      // Alway flush the buffer of the last log before switching to a new one
+      log::Writer* cur_log_writer = logs_.back().writer;
+      if (error_handler_.IsRecoveryInProgress()) {
+        // In recovery path, we force another try of writing WAL buffer.
+        cur_log_writer->file()->reset_seen_error();
+      }
+      io_s = cur_log_writer->WriteBuffer();
+      if (s.ok()) {
+        s = io_s;
+      }
+      if (!s.ok()) {
+        ROCKS_LOG_WARN(immutable_db_options_.info_log,
+                       "[%s] Failed to switch from #%" PRIu64 " to #%" PRIu64
+                       "  WAL file\n",
+                       cfd->GetName().c_str(), cur_log_writer->get_log_number(),
+                       new_log_number);
+      }
+    }
+    if (s.ok()) {
+      logfile_number_ = new_log_number;
+      log_empty_ = true;
+      log_dir_synced_ = false;
+      logs_.emplace_back(logfile_number_, new_log);
+      alive_log_files_.push_back(LogFileNumberSize(logfile_number_));
+    }
+  }
+
+  if (!s.ok()) {
+    // how do we fail if we're not creating new log?
+    assert(creating_new_log);
+    delete new_mem;
+    delete new_log;
+    context->superversion_context.new_superversion.reset();
+    // We may have lost data from the WritableFileBuffer in-memory buffer for
+    // the current log, so treat it as a fatal error and set bg_error
+    if (!io_s.ok()) {
+      error_handler_.SetBGError(io_s, BackgroundErrorReason::kMemTable);
+    } else {
+      error_handler_.SetBGError(s, BackgroundErrorReason::kMemTable);
+    }
+    // Read back bg_error in order to get the right severity
+    s = error_handler_.GetBGError();
+    return s;
+  }
+
+  bool empty_cf_updated = false;
+  if (immutable_db_options_.track_and_verify_wals_in_manifest &&
+      !immutable_db_options_.allow_2pc && creating_new_log) {
+    // In non-2pc mode, WALs become obsolete if they do not contain unflushed
+    // data. Updating the empty CF's log number might cause some WALs to become
+    // obsolete. So we should track the WAL obsoletion event before actually
+    // updating the empty CF's log number.
+    uint64_t min_wal_number_to_keep =
+        versions_->PreComputeMinLogNumberWithUnflushedData(logfile_number_);
+    if (min_wal_number_to_keep >
+        versions_->GetWalSet().GetMinWalNumberToKeep()) {
+      // Get a snapshot of the empty column families.
+      // LogAndApply may release and reacquire db
+      // mutex, during that period, column family may become empty (e.g. its
+      // flush succeeds), then it affects the computed min_log_number_to_keep,
+      // so we take a snapshot for consistency of column family data
+      // status. If a column family becomes non-empty afterwards, its active log
+      // should still be the created new log, so the min_log_number_to_keep is
+      // not affected.
+      autovector<ColumnFamilyData*> empty_cfs;
+      for (auto cf : *versions_->GetColumnFamilySet()) {
+        if (cf->IsEmpty()) {
+          empty_cfs.push_back(cf);
+        }
+      }
+
+      VersionEdit wal_deletion;
+      wal_deletion.DeleteWalsBefore(min_wal_number_to_keep);
+      s = versions_->LogAndApplyToDefaultColumnFamily(&wal_deletion, &mutex_,
+                                                      directories_.GetDbDir());
+      if (!s.ok() && versions_->io_status().IsIOError()) {
+        s = error_handler_.SetBGError(versions_->io_status(),
+                                      BackgroundErrorReason::kManifestWrite);
+      }
+      if (!s.ok()) {
+        return s;
+      }
+
+      for (auto cf : empty_cfs) {
+        if (cf->IsEmpty()) {
+          cf->SetLogNumber(logfile_number_);
+          // MEMPURGE: No need to change this, because new adds
+          // should still receive new sequence numbers.
+          cf->hot_mem()->SetCreationSeq(versions_->LastSequence());
+        }  // cf may become non-empty.
+      }
+      empty_cf_updated = true;
+    }
+  }
+  if (!empty_cf_updated) {
+    for (auto cf : *versions_->GetColumnFamilySet()) {
+      // all this is just optimization to delete logs that
+      // are no longer needed -- if CF is empty, that means it
+      // doesn't need that particular log to stay alive, so we just
+      // advance the log number. no need to persist this in the manifest
+      if (cf->IsEmpty()) {
+        if (creating_new_log) {
+          cf->SetLogNumber(logfile_number_);
+        }
+        cf->hot_mem()->SetCreationSeq(versions_->LastSequence());
+      }
+    }
+  }
+
+  cfd->hot_mem()->SetNextLogNumber(logfile_number_);
+  assert(new_mem != nullptr);
+  cfd->imm()->Add(cfd->hot_mem(), &context->memtables_to_free_);
+  new_mem->Ref();
+  cfd->SetHotMemtable(new_mem);
   InstallSuperVersionAndScheduleWork(cfd, &context->superversion_context,
                                      mutable_cf_options);
 

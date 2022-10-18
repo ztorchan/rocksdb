@@ -97,6 +97,8 @@
   //
   ```
 - **关于Flush**
+  - 在`MemTable`每次被操作后（例如`Add`、`Update`等），都会调用`UpdateFlushState`来判断MemTable是否需要被Flush，更新状态`FLUSH_NOT_REQUESTED -> FLUSH_REQUESTED`。
+  - 在上层操作中（例如`PutCFImpl`等），最后都会调用`CheckMemtableFull()`将那些被设置为`FLUSH_REQUESTED`的MemTable设置为`FLUSH_SCHEDULED`，并将其列族放入调度队列中。
   - MemTable切换主要过程由`SwitchMemtable()`完成，在`DbImpl::HandleWriteBufferFull()`, `DBImpl::SwitchWAL()`, `DBImpl::FlushMemTable()`, `DBImpl::ScheduleFlushes()`四个函数中有调用。
   - 符合被Flush的Immu MemTable会通过`DBImpl::SchedulePendingFlush()`放入`DBImpl::flush_queue_`。随后`MaybeScheduleFlushOrCompaction()`会调用后台刷新线程`BGWorkFlush`，最终通过`BackgroundFlush()`函数完成Flush工作。
   - 关于Flush的过程参考[Memtable flush分析](https://zhuanlan.zhihu.com/p/414145200)
@@ -104,24 +106,27 @@
 - **关于写入**
   - 在`options`中添加一个`hot_table_thred`选项，用于配置热数据记录表阈值，为0时关闭热数据表功能。默认为0.
   - 为`DBImpl`添加热数据记录表。
-  - 为`ColumnFamilyData`增加`hot_mem_`和`hot_imm_`，分别表示冷数据。
+  - 为`ColumnFamilyData`增加`hot_mem_`，表示热数据MemTable。
   - 为`MemTableInserter`添加热数据记录表指针，用于从`DBImpl`中获得热数据记录表，即可在写入时判断key是否为热数据。
   - 为`WriteBatchInternal::InsertInto`添加一个热记录表指针参数，用于构建`MemTableInserter`。
   - 为`GetMemTable()`添加一个bool变量参数，由此来判断是否对于当前key，应当选择`mem_`或`hot_mem_`。
 - **关于Flush**
-  - 简单起见，目前先让冷热数据的MemTable共享一些信息，例如序列号等。在执行Flush时，`mem_`和`hot_mem_`一起被Flush。
+  - 针对不同的Flush时机，调整两个Memtable的切换需求：
+    - `DBImpl::SwitchWAL()`需要将两个Memtable都切换。
+    - ......
 - **关于Version和SuperVersion**
   - ...
 ## TODO
 - 修改`PutCFImpl`及其内部相关的函数
 - 对`ColumnFamilyData`内部的所有函数看一遍，重点关注与MemTable和LogNumber有关的函数。
 - 开始对查询部分的改动。
-- 开始对Flush部分开始改动。
+- 开始对Flush相关的剩下三个函数进行修改。
 - 开始查看Compaction相关的源码。
 ## Change Log
 - **2022.10.15**：开始记录CHANGE_LOG.md。尝试为编解码和`Put`相关的函数添加了bool变量`is_hot`。但也从而引出了一系列问题。
 - **2022.10.16**：在`DBImpl`层判断key是否为热数据不是一个好方法，会造成大量的接口改动。不再将其编码进入`WriteBatch`，而是传递`DBImpl`的热数据表指针，由`MemTableInserter`做热数据判断。
 - **2022.10.17**；梳理了一下关于SwitchMemTable和Flush的流程。开始对写入过程的改动，明天应该能完成。
+- **2022.10.18**：`ColumnFamilyData`里的`MemTableList`保持一个就好了，去掉`hot_imm_`，由`MemTable`的`is_hot_`来区分是否为热数据。开始修改Flush相关的函数，添加了`SwitchHotTable`函数用于切换热MemTable。尝试完成了`DBImpl::SwitchWAL()`的修改。
 ## 存在问题
 - RocksDB的版本控制机制`Version`和`SuperVersion`等暂且还没完全弄清楚，可能也会影响到项目改动。
 - Compaction还没开始看。

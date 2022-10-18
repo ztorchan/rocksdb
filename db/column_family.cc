@@ -484,14 +484,16 @@ void SuperVersion::Cleanup() {
   cfd->UnrefAndTryDelete();
 }
 
-void SuperVersion::Init(ColumnFamilyData* new_cfd, MemTable* new_mem,
+void SuperVersion::Init(ColumnFamilyData* new_cfd, MemTable* new_mem, MemTable* new_hot_mem,
                         MemTableListVersion* new_imm, Version* new_current) {
   cfd = new_cfd;
   mem = new_mem;
+  hot_mem = new_hot_mem;
   imm = new_imm;
   current = new_current;
   cfd->Ref();
   mem->Ref();
+  hot_mem->Ref();
   imm->Ref();
   current->Ref();
   refs.store(1, std::memory_order_relaxed);
@@ -551,9 +553,6 @@ ColumnFamilyData::ColumnFamilyData(
       mem_(nullptr),
       hot_mem_(nullptr),
       imm_(ioptions_.min_write_buffer_number_to_merge,
-           ioptions_.max_write_buffer_number_to_maintain,
-           ioptions_.max_write_buffer_size_to_maintain),
-      hot_imm_(ioptions_.min_write_buffer_number_to_merge,
            ioptions_.max_write_buffer_number_to_maintain,
            ioptions_.max_write_buffer_size_to_maintain),
       super_version_(nullptr),
@@ -706,7 +705,6 @@ ColumnFamilyData::~ColumnFamilyData() {
   }
   autovector<MemTable*> to_delete;
   imm_.current()->Unref(&to_delete);
-  hot_imm_.current()->Unref(&to_delete);
   for (MemTable* m : to_delete) {
     delete m;
   }
@@ -773,6 +771,7 @@ uint64_t ColumnFamilyData::OldestLogToKeep() {
   if (allow_2pc_) {
     auto imm_prep_log = imm()->PrecomputeMinLogContainingPrepSection();
     auto mem_prep_log = mem()->GetMinLogContainingPrepSection();
+    auto hot_mem_prep_log = hot_mem()->GetMinLogContainingPrepSection();
 
     if (imm_prep_log > 0 && imm_prep_log < current_log) {
       current_log = imm_prep_log;
@@ -780,6 +779,10 @@ uint64_t ColumnFamilyData::OldestLogToKeep() {
 
     if (mem_prep_log > 0 && mem_prep_log < current_log) {
       current_log = mem_prep_log;
+    }
+    
+    if (hot_mem_prep_log > 0 && hot_mem_prep_log < current_log) {
+      current_log = hot_mem_prep_log;
     }
   }
 
@@ -1336,7 +1339,7 @@ void ColumnFamilyData::InstallSuperVersion(
     const MutableCFOptions& mutable_cf_options) {
   SuperVersion* new_superversion = sv_context->new_superversion.release();
   new_superversion->mutable_cf_options = mutable_cf_options;
-  new_superversion->Init(this, mem_, imm_.current(), current_);
+  new_superversion->Init(this, mem_, hot_mem_, imm_.current(), current_);
   SuperVersion* old_superversion = super_version_;
   super_version_ = new_superversion;
   ++super_version_number_;

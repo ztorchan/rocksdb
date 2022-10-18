@@ -1878,6 +1878,8 @@ class DBImpl : public DB {
 
   Status SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context);
 
+  Status SwitchHotMemtable(ColumnFamilyData* cfd, WriteContext* context);
+
   void SelectColumnFamiliesForAtomicFlush(autovector<ColumnFamilyData*>* cfds);
 
   // Force current memtable contents to be flushed.
