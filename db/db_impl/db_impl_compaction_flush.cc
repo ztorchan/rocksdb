@@ -2064,6 +2064,10 @@ Status DBImpl::FlushMemTable(ColumnFamilyData* cfd,
       // be created and scheduled, status::OK() will be returned.
       s = SwitchMemtable(cfd, &context);
     }
+    if (flush_reason != FlushReason::kErrorRecoveryRetryFlush &&
+        (!cfd->mem()->IsEmpty() || !cached_recoverable_state_empty_.load())) {
+      s = SwitchHotMemtable(cfd, &context);
+    }
     const uint64_t flush_memtable_id = std::numeric_limits<uint64_t>::max();
     if (s.ok()) {
       if (cfd->imm()->NumNotFlushed() != 0 || !cfd->mem()->IsEmpty() ||

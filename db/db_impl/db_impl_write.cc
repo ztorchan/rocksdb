@@ -1665,10 +1665,12 @@ Status DBImpl::HandleWriteBufferManagerFlush(WriteContext* write_context) {
   // no need to refcount because drop is happening in write thread, so can't
   // happen while we're in the write thread
   autovector<ColumnFamilyData*> cfds;
+  autovector<bool> pick_hots;
   if (immutable_db_options_.atomic_flush) {     // ztorchan：atomic_flush模式下，可以选择多个列族进行flush；否则，选择MemTable序号最小的列族进行flush
     SelectColumnFamiliesForAtomicFlush(&cfds);
   } else {
     ColumnFamilyData* cfd_picked = nullptr;
+    bool is_hot_mem;
     SequenceNumber seq_num_for_cf_picked = kMaxSequenceNumber;
 
     for (auto cfd : *versions_->GetColumnFamilySet()) {
@@ -1684,11 +1686,21 @@ Status DBImpl::HandleWriteBufferManagerFlush(WriteContext* write_context) {
         if (cfd_picked == nullptr || seq < seq_num_for_cf_picked) {
           cfd_picked = cfd;
           seq_num_for_cf_picked = seq;
+          is_hot_mem = false;
+        }
+      }
+      if (!cfd->hot_mem()->IsEmpty() && !cfd->imm()->IsFlushPendingOrRunning()) {
+        uint64_t seq = cfd->hot_mem()->GetCreationSeq();
+        if (cfd_picked == nullptr || seq < seq_num_for_cf_picked) {
+          cfd_picked = cfd;
+          seq_num_for_cf_picked = seq;
+          is_hot_mem = true;
         }
       }
     }
     if (cfd_picked != nullptr) {
       cfds.push_back(cfd_picked);
+      pick_hots.push_back(is_hot_mem);
     }
     MaybeFlushStatsCF(&cfds);
   }
@@ -1706,12 +1718,17 @@ Status DBImpl::HandleWriteBufferManagerFlush(WriteContext* write_context) {
   if (two_write_queues_) {
     nonmem_write_thread_.EnterUnbatched(&nonmem_w, &mutex_);
   }
-  for (const auto cfd : cfds) {     // ztorchan：调用SwitchMemtable为选中的CFD切换MemTable，注意在过程中需要调用Ref和UnRef
-    if (cfd->mem()->IsEmpty()) {
+  assert(cfds.size() == pick_hots.size());
+  for (size_t i = 0; i < cfds.size(); i++) {     // ztorchan：调用SwitchMemtable为选中的CFD切换MemTable，注意在过程中需要调用Ref和UnRef
+    auto cfd = cfds[i];
+    bool pick_hot = pick_hots[i];
+    if ((!pick_hot && cfd->mem()->IsEmpty()) || (pick_hot && cfd->hot_mem()->IsEmpty())) {
       continue;
     }
     cfd->Ref();
-    status = SwitchMemtable(cfd, write_context);
+    if (pick_hot) { status = SwitchMemtable(cfd, write_context); }
+    else { status = SwitchHotMemtable(cfd, write_context); }
+
     cfd->UnrefAndTryDelete();
     if (!status.ok()) {
       break;
@@ -1973,8 +1990,11 @@ Status DBImpl::ScheduleFlushes(WriteContext* context) {
   }
 
   for (auto& cfd : cfds) {
-    if (!cfd->mem()->IsEmpty()) {
+    if (!cfd->mem()->IsEmpty() && cfd->mem()->IsFlushScheduled()) {
       status = SwitchMemtable(cfd, context);
+    }
+    if (!cfd->hot_mem()->IsEmpty() && cfd->hot_mem()->IsFlushScheduled()) {
+      status = SwitchHotMemtable(cfd, context);
     }
     if (cfd->UnrefAndTryDelete()) {
       cfd = nullptr;

@@ -666,6 +666,8 @@ private:
 public:
   inline void SetHot() { is_hot = true; }
   inline bool IsHot() { return is_hot; }
+
+  inline bool IsFlushScheduled() { return flush_state_ == FLUSH_SCHEDULED; }
 };
 
 extern const char* EncodeKey(std::string* scratch, const Slice& target);
