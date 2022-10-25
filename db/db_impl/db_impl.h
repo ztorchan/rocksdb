@@ -69,6 +69,8 @@
 #include "util/stop_watch.h"
 #include "util/thread_local.h"
 
+#include "db/hot_table.h"
+
 namespace ROCKSDB_NAMESPACE {
 
 class Arena;
@@ -1819,6 +1821,15 @@ class DBImpl : public DB {
       SnapshotChecker* snapshot_checker, LogBuffer* log_buffer,
       Env::Priority thread_pri);
 
+  Status FlushMemTableToOutputFileWithHotColdSeparation(
+      ColumnFamilyData* cfd, const MutableCFOptions& mutable_cf_options,
+      bool* madeProgress, JobContext* job_context,
+      SuperVersionContext* superversion_context,
+      std::vector<SequenceNumber>& snapshot_seqs,
+      SequenceNumber earliest_write_conflict_snapshot,
+      SnapshotChecker* snapshot_checker, LogBuffer* log_buffer,
+      Env::Priority thread_pri);
+
   // Flush the memtables of (multiple) column families to multiple files on
   // persistent storage.
   Status FlushMemTablesToOutputFiles(
@@ -2673,6 +2684,8 @@ class DBImpl : public DB {
   // seqno_time_mapping_ stores the sequence number to time mapping, it's not
   // thread safe, both read and write need db mutex hold.
   SeqnoToTimeMapping seqno_time_mapping_;
+
+  HotTable* hot_table_;
 };
 
 class GetWithTimestampReadCallback : public ReadCallback {

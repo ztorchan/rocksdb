@@ -247,7 +247,8 @@ DBImpl::DBImpl(const DBOptions& options, const std::string& dbname,
       atomic_flush_install_cv_(&mutex_),
       blob_callback_(immutable_db_options_.sst_file_manager.get(), &mutex_,
                      &error_handler_, &event_logger_,
-                     immutable_db_options_.listeners, dbname_) {
+                     immutable_db_options_.listeners, dbname_),
+      hot_table_(nullptr) {
   // !batch_per_trx_ implies seq_per_batch_ because it is only unset for
   // WriteUnprepared, which should use seq_per_batch_.
   assert(batch_per_txn_ || seq_per_batch_);
@@ -294,6 +295,11 @@ DBImpl::DBImpl(const DBOptions& options, const std::string& dbname,
                             std::memory_order_relaxed);
   if (write_buffer_manager_) {
     wbm_stall_.reset(new WBMStallInterface());
+  }
+
+  if (initial_db_options_.hot_table_threhold != 0) {
+    hot_table_ = new HotTable(initial_db_options_.hot_table_threhold, initial_db_options_.cnter_per_key);
+    assert(hot_table_ == nullptr);
   }
 }
 

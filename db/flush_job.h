@@ -86,6 +86,9 @@ class FlushJob {
   Status Run(LogsWithPrepTracker* prep_tracker = nullptr,
              FileMetaData* file_meta = nullptr,
              bool* switched_to_mempurge = nullptr);
+  Status RunWithHotColdSeparation(LogsWithPrepTracker* prep_tracker = nullptr,
+             FileMetaData* cold_file_meta = nullptr, FileMetaData* hot_file_meta = nullptr, 
+             bool* switched_to_mempurge = nullptr);
   void Cancel();
   const autovector<MemTable*>& GetMemTables() const { return mems_; }
 
@@ -182,6 +185,7 @@ class FlushJob {
 
   // Variables below are set by PickMemTable():
   FileMetaData meta_;
+  FileMetaData hot_meta_;
   autovector<MemTable*> mems_;
   VersionEdit* edit_;
   Version* base_;

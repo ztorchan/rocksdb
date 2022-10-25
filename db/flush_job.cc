@@ -357,6 +357,155 @@ Status FlushJob::Run(LogsWithPrepTracker* prep_tracker, FileMetaData* file_meta,
   return s;
 }
 
+Status FlushJob::RunWithHotColdSeparation(LogsWithPrepTracker* prep_tracker, FileMetaData* cold_file_meta, FileMetaData* hot_file_meta,
+                     bool* switched_to_mempurge) {
+  TEST_SYNC_POINT("FlushJob::Start");
+  db_mutex_->AssertHeld();
+  assert(pick_memtable_called);
+  // Mempurge threshold can be dynamically changed.
+  // For sake of consistency, mempurge_threshold is
+  // saved locally to maintain consistency in each
+  // FlushJob::Run call.
+  double mempurge_threshold =
+      mutable_cf_options_.experimental_mempurge_threshold;
+
+  AutoThreadOperationStageUpdater stage_run(
+      ThreadStatus::STAGE_FLUSH_RUN);
+  if (mems_.empty()) {
+    ROCKS_LOG_BUFFER(log_buffer_, "[%s] Nothing in memtable to flush",
+                     cfd_->GetName().c_str());
+    return Status::OK();
+  }
+
+  // I/O measurement variables
+  PerfLevel prev_perf_level = PerfLevel::kEnableTime;
+  uint64_t prev_write_nanos = 0;
+  uint64_t prev_fsync_nanos = 0;
+  uint64_t prev_range_sync_nanos = 0;
+  uint64_t prev_prepare_write_nanos = 0;
+  uint64_t prev_cpu_write_nanos = 0;
+  uint64_t prev_cpu_read_nanos = 0;
+  if (measure_io_stats_) {
+    prev_perf_level = GetPerfLevel();
+    SetPerfLevel(PerfLevel::kEnableTime);
+    prev_write_nanos = IOSTATS(write_nanos);
+    prev_fsync_nanos = IOSTATS(fsync_nanos);
+    prev_range_sync_nanos = IOSTATS(range_sync_nanos);
+    prev_prepare_write_nanos = IOSTATS(prepare_write_nanos);
+    prev_cpu_write_nanos = IOSTATS(cpu_write_nanos);
+    prev_cpu_read_nanos = IOSTATS(cpu_read_nanos);
+  }
+  Status mempurge_s = Status::NotFound("No MemPurge.");
+  if ((mempurge_threshold > 0.0) &&
+      (cfd_->GetFlushReason() == FlushReason::kWriteBufferFull) &&
+      (!mems_.empty()) && MemPurgeDecider(mempurge_threshold) &&
+      !(db_options_.atomic_flush)) {
+    cfd_->SetMempurgeUsed();
+    mempurge_s = MemPurge();
+    if (!mempurge_s.ok()) {
+      // Mempurge is typically aborted when the output
+      // bytes cannot be contained onto a single output memtable.
+      if (mempurge_s.IsAborted()) {
+        ROCKS_LOG_INFO(db_options_.info_log, "Mempurge process aborted: %s\n",
+                       mempurge_s.ToString().c_str());
+      } else {
+        // However the mempurge process can also fail for
+        // other reasons (eg: new_mem->Add() fails).
+        ROCKS_LOG_WARN(db_options_.info_log, "Mempurge process failed: %s\n",
+                       mempurge_s.ToString().c_str());
+      }
+    } else {
+      if (switched_to_mempurge) {
+        *switched_to_mempurge = true;
+      } else {
+        // The mempurge process was successful, but no switch_to_mempurge
+        // pointer provided so no way to propagate the state of flush job.
+        ROCKS_LOG_WARN(db_options_.info_log,
+                       "Mempurge process succeeded"
+                       "but no 'switched_to_mempurge' ptr provided.\n");
+      }
+    }
+  }
+  Status s;
+  if (mempurge_s.ok()) {
+    base_->Unref();
+    s = Status::OK();
+  } else {
+    // This will release and re-acquire the mutex.
+    s = WriteLevel0Table();
+  }
+
+  if (s.ok() && cfd_->IsDropped()) {
+    s = Status::ColumnFamilyDropped("Column family dropped during compaction");
+  }
+  if ((s.ok() || s.IsColumnFamilyDropped()) &&
+      shutting_down_->load(std::memory_order_acquire)) {
+    s = Status::ShutdownInProgress("Database shutdown");
+  }
+
+  if (!s.ok()) {
+    cfd_->imm()->RollbackMemtableFlush(mems_, meta_.fd.GetNumber());
+  } else if (write_manifest_) {
+    TEST_SYNC_POINT("FlushJob::InstallResults");
+    // Replace immutable memtable with the generated Table
+    s = cfd_->imm()->TryInstallMemtableFlushResults(
+        cfd_, mutable_cf_options_, mems_, prep_tracker, versions_, db_mutex_,
+        meta_.fd.GetNumber(), &job_context_->memtables_to_free, db_directory_,
+        log_buffer_, &committed_flush_jobs_info_,
+        !(mempurge_s.ok()) /* write_edit : true if no mempurge happened (or if aborted),
+                              but 'false' if mempurge successful: no new min log number
+                              or new level 0 file path to write to manifest. */);
+  }
+
+  if (s.ok() && file_meta != nullptr) {
+    *file_meta = meta_;
+  }
+  RecordFlushIOStats();
+
+  // When measure_io_stats_ is true, the default 512 bytes is not enough.
+  auto stream = event_logger_->LogToBuffer(log_buffer_, 1024);
+  stream << "job" << job_context_->job_id << "event"
+         << "flush_finished";
+  stream << "output_compression"
+         << CompressionTypeToString(output_compression_);
+  stream << "lsm_state";
+  stream.StartArray();
+  auto vstorage = cfd_->current()->storage_info();
+  for (int level = 0; level < vstorage->num_levels(); ++level) {
+    stream << vstorage->NumLevelFiles(level);
+  }
+  stream.EndArray();
+
+  const auto& blob_files = vstorage->GetBlobFiles();
+  if (!blob_files.empty()) {
+    assert(blob_files.front());
+    stream << "blob_file_head" << blob_files.front()->GetBlobFileNumber();
+
+    assert(blob_files.back());
+    stream << "blob_file_tail" << blob_files.back()->GetBlobFileNumber();
+  }
+
+  stream << "immutable_memtables" << cfd_->imm()->NumNotFlushed();
+
+  if (measure_io_stats_) {
+    if (prev_perf_level != PerfLevel::kEnableTime) {
+      SetPerfLevel(prev_perf_level);
+    }
+    stream << "file_write_nanos" << (IOSTATS(write_nanos) - prev_write_nanos);
+    stream << "file_range_sync_nanos"
+           << (IOSTATS(range_sync_nanos) - prev_range_sync_nanos);
+    stream << "file_fsync_nanos" << (IOSTATS(fsync_nanos) - prev_fsync_nanos);
+    stream << "file_prepare_write_nanos"
+           << (IOSTATS(prepare_write_nanos) - prev_prepare_write_nanos);
+    stream << "file_cpu_write_nanos"
+           << (IOSTATS(cpu_write_nanos) - prev_cpu_write_nanos);
+    stream << "file_cpu_read_nanos"
+           << (IOSTATS(cpu_read_nanos) - prev_cpu_read_nanos);
+  }
+
+  return s;
+}
+
 void FlushJob::Cancel() {
   db_mutex_->AssertHeld();
   assert(base_ != nullptr);
