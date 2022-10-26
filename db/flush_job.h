@@ -273,7 +273,8 @@ class FlushJobWithColdHotSeparation {
   // The rate limiter priority (io_priority) is determined dynamically here.
   Env::IOPriority GetRateLimiterPriorityForWrite();
 #ifndef ROCKSDB_LITE
-  std::unique_ptr<FlushJobInfo> GetFlushJobInfo() const;
+  std::unique_ptr<FlushJobInfo> GetFlushJobColdInfo() const;
+  std::unique_ptr<FlushJobInfo> GetFlushJobHotInfo() const;
 #endif  // !ROCKSDB_LITE
 
   const std::string& dbname_;

@@ -764,10 +764,10 @@ Status BuildTableWithColdHotSeparation(
         if (memtable_payload_bytes != nullptr &&
             memtable_garbage_bytes != nullptr) {
           const CompactionIterationStats& ci_stats = c_iter.iter_stats();
-          uint64_t total_payload_bytes = ci_stats.total_input_raw_key_bytes +
+          total_payload_bytes = ci_stats.total_input_raw_key_bytes +
                                         ci_stats.total_input_raw_value_bytes +
                                         total_tombstone_payload_bytes;
-          uint64_t total_payload_bytes_written =
+          total_payload_bytes_written =
               (hot_tp.raw_key_size + hot_tp.raw_value_size);
         }
         if (hot_table_properties) {
