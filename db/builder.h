@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "db/hot_table.h"
 #include "db/range_tombstone_fragmenter.h"
 #include "db/seqno_to_time_mapping.h"
 #include "db/table_properties_collector.h"
@@ -36,6 +37,7 @@ class TableBuilder;
 class WritableFileWriter;
 class InternalStats;
 class BlobFileCompletionCallback;
+struct TableBuilderOptionsWithColdHotSeparation;
 
 // Convenience function for NewTableBuilder on the embedded table_factory.
 TableBuilder* NewTableBuilder(const TableBuilderOptions& tboptions,
