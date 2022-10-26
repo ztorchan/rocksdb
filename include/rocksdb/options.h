@@ -334,6 +334,19 @@ struct ColumnFamilyOptions : public AdvancedColumnFamilyOptions {
   // Default: nullptr
   std::shared_ptr<SstPartitionerFactory> sst_partitioner_factory = nullptr;
 
+  // If set to 0, close Hot Table.
+  // Otherwise, every key whose access counter bigger than or equal to 
+  // hot_table_threhold will be seen as hot key (range 0 ~ 15).
+  //
+  // Default: 0(close Hot Table)
+  uint32_t hot_table_threhold = 0;
+
+  // If hot_table_threhold != 0, cnter_per_key indicates the counter per key 
+  // of the CountingBloomFilter in HotTable.
+  //
+  // Default: 3
+  uint32_t cnter_per_key = 3;
+
   // Create ColumnFamilyOptions with default values for all fields
   ColumnFamilyOptions();
   // Create ColumnFamilyOptions from Options
@@ -1394,19 +1407,6 @@ struct DBOptions {
   // of the contract leads to undefined behaviors with high possibility of data
   // inconsistency, e.g. deleted old data become visible again, etc.
   bool enforce_single_del_contracts = true;
-
-  // If set to 0, close Hot Table.
-  // Otherwise, every key whose access counter bigger than or equal to 
-  // hot_table_threhold will be seen as hot key (range 0 ~ 15).
-  //
-  // Default: 0(close Hot Table)
-  uint32_t hot_table_threhold = 0;
-
-  // If hot_table_threhold != 0, cnter_per_key indicates the counter per key 
-  // of the CountingBloomFilter in HotTable.
-  //
-  // Default: 3
-  uint32_t cnter_per_key = 3;
 };
 
 // Options to control the behavior of a database (passed to DB::Open)

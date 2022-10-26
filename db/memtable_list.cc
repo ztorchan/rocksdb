@@ -523,9 +523,20 @@ Status MemTableList::TryInstallMemtableFlushResults(
         edit_list.push_back(&m->edit_);
         memtables_to_flush.push_back(m);
 #ifndef ROCKSDB_LITE
-        std::unique_ptr<FlushJobInfo> info = m->ReleaseFlushJobInfo();
-        if (info != nullptr) {
-          committed_flush_jobs_info->push_back(std::move(info));
+        if (cfd->GetHotTable() == nullptr) {
+          std::unique_ptr<FlushJobInfo> info = m->ReleaseFlushJobInfo();
+          if (info != nullptr) {
+            committed_flush_jobs_info->push_back(std::move(info));
+          }
+        } else {
+          std::unique_ptr<FlushJobInfo> info = m->ReleaseFlushJobColdInfo();
+          if (info != nullptr) {
+            committed_flush_jobs_info->push_back(std::move(info));
+          }
+          info = m->ReleaseFlushJobColdInfo();
+          if (info != nullptr) {
+            committed_flush_jobs_info->push_back(std::move(info));
+          }
         }
 #else
         (void)committed_flush_jobs_info;

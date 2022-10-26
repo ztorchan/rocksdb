@@ -371,7 +371,7 @@ Status DBImpl::FlushMemTableToOutputFile(
   return s;
 }
 
-Status DBImpl::FlushMemTableToOutputFileWithHotColdSeparation(
+Status DBImpl::FlushMemTableToOutputFileWithColdHotSeparation(
     ColumnFamilyData* cfd, const MutableCFOptions& mutable_cf_options,
     bool* made_progress, JobContext* job_context,
     SuperVersionContext* superversion_context,
@@ -429,7 +429,7 @@ Status DBImpl::FlushMemTableToOutputFileWithHotColdSeparation(
   // To address this, we make sure NotifyOnFlushBegin() executes after memtable
   // picking so that no new snapshot can be taken between the two functions.
 
-  FlushJob flush_job(
+  FlushJobWithColdHotSeparation flush_job(
       dbname_, cfd, immutable_db_options_, mutable_cf_options, max_memtable_id,
       file_options_for_compaction_, versions_.get(), &mutex_, &shutting_down_,
       snapshot_seqs, earliest_write_conflict_snapshot, snapshot_checker,
@@ -490,7 +490,7 @@ Status DBImpl::FlushMemTableToOutputFileWithHotColdSeparation(
   // and EventListener callback will be called when the db_mutex
   // is unlocked by the current thread.
   if (s.ok()) {
-    s = flush_job.RunWithHotColdSeparation(&logs_with_prep_tracker_, &cold_file_meta, &hot_file_meta,
+    s = flush_job.Run(&logs_with_prep_tracker_, &cold_file_meta, &hot_file_meta,
                       &switched_to_mempurge);
     need_cancel = false;
   }
@@ -612,10 +612,18 @@ Status DBImpl::FlushMemTablesToOutputFiles(
   MutableCFOptions mutable_cf_options_copy = *cfd->GetLatestMutableCFOptions();
   SuperVersionContext* superversion_context =
       bg_flush_arg.superversion_context_;
-  Status s = FlushMemTableToOutputFile(
+  Status s;
+  if (cfd->GetHotTable() != nullptr) {
+    s = FlushMemTableToOutputFileWithColdHotSeparation(
       cfd, mutable_cf_options_copy, made_progress, job_context,
       superversion_context, snapshot_seqs, earliest_write_conflict_snapshot,
       snapshot_checker, log_buffer, thread_pri);
+  } else {
+    s = FlushMemTableToOutputFile(
+      cfd, mutable_cf_options_copy, made_progress, job_context,
+      superversion_context, snapshot_seqs, earliest_write_conflict_snapshot,
+      snapshot_checker, log_buffer, thread_pri);
+  }
   return s;
 }
 

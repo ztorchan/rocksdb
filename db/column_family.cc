@@ -565,7 +565,8 @@ ColumnFamilyData::ColumnFamilyData(
       allow_2pc_(db_options.allow_2pc),
       last_memtable_id_(0),
       db_paths_registered_(false),
-      mempurge_used_(false) {
+      mempurge_used_(false),
+      hot_table_(nullptr) {
   if (id_ != kDummyColumnFamilyDataId) {
     // TODO(cc): RegisterDbPaths can be expensive, considering moving it
     // outside of this constructor which might be called with db mutex held.
@@ -579,6 +580,10 @@ ColumnFamilyData::ColumnFamilyData(
           ioptions_.logger,
           "Failed to register data paths of column family (id: %d, name: %s)",
           id_, name_.c_str());
+    }
+    if (cf_options.hot_table_threhold != 0) {
+      hot_table_ = new HotTable(cf_options.hot_table_threhold, cf_options.cnter_per_key);
+      assert(hot_table_ == nullptr);
     }
   }
   Ref();
@@ -712,6 +717,10 @@ ColumnFamilyData::~ColumnFamilyData() {
           "Failed to unregister data paths of column family (id: %d, name: %s)",
           id_, name_.c_str());
     }
+  }
+
+  if (hot_table_ != nullptr) {
+    delete hot_table_;
   }
 }
 

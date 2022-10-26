@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "cache/cache_reservation_manager.h"
+#include "db/hot_table.h"
 #include "db/memtable_list.h"
 #include "db/table_cache.h"
 #include "db/table_properties_collector.h"
@@ -532,6 +533,8 @@ class ColumnFamilyData {
   void SetMempurgeUsed() { mempurge_used_ = true; }
   bool GetMempurgeUsed() { return mempurge_used_; }
 
+  HotTable* GetHotTable() { return hot_table_; }
+
  private:
   friend class ColumnFamilySet;
   ColumnFamilyData(uint32_t id, const std::string& name,
@@ -633,6 +636,9 @@ class ColumnFamilyData {
   // a Version associated with this CFD
   std::shared_ptr<CacheReservationManager> file_metadata_cache_res_mgr_;
   bool mempurge_used_;
+
+  // hot table
+  HotTable* hot_table_;
 };
 
 // ColumnFamilySet has interesting thread-safety requirements

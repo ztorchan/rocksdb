@@ -20,5 +20,8 @@
 - 需要在整个流程里多添加一个`FileMetaData`，一共两个分别用于冷热SST的生成过程。
 - 在`BuildTable()`中，每次迭代`CompactionIterator`取出Key就要结合HotTable判断其属于冷还是热数据，送入不同的处理分支。
 
+## 日志
+- **2022.10.25**：定义了类`FlushJobWithColdHotSeparation`，在`FlushJob`的替代；定义了`DBImpl::FlushMemTableToOutputFileWithColdHotSeparation()`作为`DBImpl::FlushMemTableToOutputFile()`的替代；定义了类`TableBuilderOptionsWithColdHotSeparation`作为`TableBuilderOptions`的替代；定义了`BuildTableWithColdHotSeparation()`作为`BuildTable()`的替代。沿着Flush主流程的调用栈一路改动，目前改动到`BuildTableWithColdHotSeparation()`中对`builder`的delete之处。
+
 ## 目前问题和难点
 - Flush过程中的两个FileMetaData那些信息是共享的哪些是独立的。

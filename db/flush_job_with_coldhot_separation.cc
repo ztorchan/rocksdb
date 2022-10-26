@@ -48,40 +48,7 @@
 
 namespace ROCKSDB_NAMESPACE {
 
-const char* GetFlushReasonString (FlushReason flush_reason) {
-  switch (flush_reason) {
-    case FlushReason::kOthers:
-      return "Other Reasons";
-    case FlushReason::kGetLiveFiles:
-      return "Get Live Files";
-    case FlushReason::kShutDown:
-      return "Shut down";
-    case FlushReason::kExternalFileIngestion:
-      return "External File Ingestion";
-    case FlushReason::kManualCompaction:
-      return "Manual Compaction";
-    case FlushReason::kWriteBufferManager:
-      return "Write Buffer Manager";
-    case FlushReason::kWriteBufferFull:
-      return "Write Buffer Full";
-    case FlushReason::kTest:
-      return "Test";
-    case FlushReason::kDeleteFiles:
-      return "Delete Files";
-    case FlushReason::kAutoCompaction:
-      return "Auto Compaction";
-    case FlushReason::kManualFlush:
-      return "Manual Flush";
-    case FlushReason::kErrorRecovery:
-      return "Error Recovery";
-    case FlushReason::kWalFull:
-      return "WAL Full";
-    default:
-      return "Invalid";
-  }
-}
-
-FlushJob::FlushJob(
+FlushJobWithColdHotSeparation::FlushJobWithColdHotSeparation(
     const std::string& dbname, ColumnFamilyData* cfd,
     const ImmutableDBOptions& db_options,
     const MutableCFOptions& mutable_cf_options, uint64_t max_memtable_id,
@@ -133,14 +100,14 @@ FlushJob::FlushJob(
       db_impl_seqno_time_mapping_(seqno_time_mapping) {
   // Update the thread status to indicate flush.
   ReportStartedFlush();
-  TEST_SYNC_POINT("FlushJob::FlushJob()");
+  TEST_SYNC_POINT("FlushJobWithColdHotSeparation::FlushJobWithColdHotSeparation()");
 }
 
-FlushJob::~FlushJob() {
+FlushJobWithColdHotSeparation::~FlushJobWithColdHotSeparation() {
   ThreadStatusUtil::ResetThreadStatus();
 }
 
-void FlushJob::ReportStartedFlush() {
+void FlushJobWithColdHotSeparation::ReportStartedFlush() {
   ThreadStatusUtil::SetColumnFamily(cfd_, cfd_->ioptions()->env,
                                     db_options_.enable_thread_tracking);
   ThreadStatusUtil::SetThreadOperation(ThreadStatus::OP_FLUSH);
@@ -150,7 +117,7 @@ void FlushJob::ReportStartedFlush() {
   IOSTATS_RESET(bytes_written);
 }
 
-void FlushJob::ReportFlushInputSize(const autovector<MemTable*>& mems) {
+void FlushJobWithColdHotSeparation::ReportFlushInputSize(const autovector<MemTable*>& mems) {
   uint64_t input_size = 0;
   for (auto* mem : mems) {
     input_size += mem->ApproximateMemoryUsage();
@@ -160,14 +127,13 @@ void FlushJob::ReportFlushInputSize(const autovector<MemTable*>& mems) {
       input_size);
 }
 
-void FlushJob::RecordFlushIOStats() {
+void FlushJobWithColdHotSeparation::RecordFlushIOStats() {
   RecordTick(stats_, FLUSH_WRITE_BYTES, IOSTATS(bytes_written));
   ThreadStatusUtil::IncreaseThreadOperationProperty(
       ThreadStatus::FLUSH_BYTES_WRITTEN, IOSTATS(bytes_written));
   IOSTATS_RESET(bytes_written);
 }
-
-void FlushJob::PickMemTable() {
+void FlushJobWithColdHotSeparation::PickMemTable() {
   db_mutex_->AssertHeld();
   assert(!pick_memtable_called);
   pick_memtable_called = true;
@@ -194,6 +160,7 @@ void FlushJob::PickMemTable() {
   // entries mems are (implicitly) sorted in ascending order by their created
   // time. We will use the first memtable's `edit` to keep the meta info for
   // this flush.
+  // ztorchan: mems_[0]是最新的
   MemTable* m = mems_[0];
   edit_ = m->GetEdits();
   edit_->SetPrevLogNumber(0);
@@ -203,21 +170,22 @@ void FlushJob::PickMemTable() {
   edit_->SetColumnFamily(cfd_->GetID());
 
   // path 0 for level 0 file.
-  meta_.fd = FileDescriptor(versions_->NewFileNumber(), 0, 0);
+  cold_meta_.fd = FileDescriptor(versions_->NewFileNumber(), 0, 0);
+  hot_meta_.fd = FileDescriptor(versions_->NewFileNumber(), 0, 0);    // ztorchan: 热SST的文件号比冷SST大1
 
   base_ = cfd_->current();
   base_->Ref();  // it is likely that we do not need this reference
 }
 
-Status FlushJob::Run(LogsWithPrepTracker* prep_tracker, FileMetaData* file_meta,
+Status FlushJobWithColdHotSeparation::Run(LogsWithPrepTracker* prep_tracker, FileMetaData* cold_file_meta, FileMetaData *hot_file_meta
                      bool* switched_to_mempurge) {
-  TEST_SYNC_POINT("FlushJob::Start");
+  TEST_SYNC_POINT("FlushJobWithColdHotSeparation::Start");
   db_mutex_->AssertHeld();
   assert(pick_memtable_called);
   // Mempurge threshold can be dynamically changed.
   // For sake of consistency, mempurge_threshold is
   // saved locally to maintain consistency in each
-  // FlushJob::Run call.
+  // FlushJobWithColdHotSeparation::Run call.
   double mempurge_threshold =
       mutable_cf_options_.experimental_mempurge_threshold;
 
@@ -296,9 +264,9 @@ Status FlushJob::Run(LogsWithPrepTracker* prep_tracker, FileMetaData* file_meta,
   }
 
   if (!s.ok()) {
-    cfd_->imm()->RollbackMemtableFlush(mems_, meta_.fd.GetNumber());
+    cfd_->imm()->RollbackMemtableFlush(mems_, cold_meta_.fd.GetNumber());
   } else if (write_manifest_) {
-    TEST_SYNC_POINT("FlushJob::InstallResults");
+    TEST_SYNC_POINT("FlushJobWithColdHotSeparation::InstallResults");
     // Replace immutable memtable with the generated Table
     s = cfd_->imm()->TryInstallMemtableFlushResults(
         cfd_, mutable_cf_options_, mems_, prep_tracker, versions_, db_mutex_,
@@ -309,8 +277,11 @@ Status FlushJob::Run(LogsWithPrepTracker* prep_tracker, FileMetaData* file_meta,
                               or new level 0 file path to write to manifest. */);
   }
 
-  if (s.ok() && file_meta != nullptr) {
-    *file_meta = meta_;
+  if (s.ok() && cold_file_meta != nullptr) {
+    *cold_file_meta = cold_meta_;
+  }
+  if (s.ok() && hot_file_meta != nullptr) {
+    *hot_file_meta = cold_meta_;
   }
   RecordFlushIOStats();
 
@@ -358,13 +329,13 @@ Status FlushJob::Run(LogsWithPrepTracker* prep_tracker, FileMetaData* file_meta,
   return s;
 }
 
-void FlushJob::Cancel() {
+void FlushJobWithColdHotSeparation::Cancel() {
   db_mutex_->AssertHeld();
   assert(base_ != nullptr);
   base_->Unref();
 }
 
-Status FlushJob::MemPurge() {
+Status FlushJobWithColdHotSeparation::MemPurge() {
   Status s;
   db_mutex_->AssertHeld();
   db_mutex_->Unlock();
@@ -603,8 +574,8 @@ Status FlushJob::MemPurge() {
 #ifndef ROCKSDB_LITE
         // Piggyback FlushJobInfo on the first flushed memtable.
         db_mutex_->AssertHeld();
-        meta_.fd.file_size = 0;
-        mems_[0]->SetFlushJobInfo(GetFlushJobInfo());
+        cold_meta_.fd.file_size = 0;
+        mems_[0]->SetFlushJobColdInfo(GetFlushJobInfo());
 #endif  // !ROCKSDB_LITE
         db_mutex_->Unlock();
       } else {
@@ -627,9 +598,9 @@ Status FlushJob::MemPurge() {
   // If mempurge successful, don't write input tables to level0,
   // but write any full output table to level0.
   if (s.ok()) {
-    TEST_SYNC_POINT("DBImpl::FlushJob:MemPurgeSuccessful");
+    TEST_SYNC_POINT("DBImpl::FlushJobWithColdHotSeparation:MemPurgeSuccessful");
   } else {
-    TEST_SYNC_POINT("DBImpl::FlushJob:MemPurgeUnsuccessful");
+    TEST_SYNC_POINT("DBImpl::FlushJobWithColdHotSeparation:MemPurgeUnsuccessful");
   }
   const uint64_t micros = clock_->NowMicros() - start_micros;
   const uint64_t cpu_micros = clock_->CPUMicros() - start_cpu_micros;
@@ -644,7 +615,7 @@ Status FlushJob::MemPurge() {
   return s;
 }
 
-bool FlushJob::MemPurgeDecider(double threshold) {
+bool FlushJobWithColdHotSeparation::MemPurgeDecider(double threshold) {
   // Never trigger mempurge if threshold is not a strictly positive value.
   if (!(threshold > 0.0)) {
     return false;
@@ -815,7 +786,7 @@ bool FlushJob::MemPurgeDecider(double threshold) {
           threshold);
 }
 
-Status FlushJob::WriteLevel0Table() {
+Status FlushJobWithColdHotSeparation::WriteLevel0Table() {
   AutoThreadOperationStageUpdater stage_updater(
       ThreadStatus::STAGE_FLUSH_WRITE_L0);
   db_mutex_->AssertHeld();
@@ -823,17 +794,17 @@ Status FlushJob::WriteLevel0Table() {
   const uint64_t start_cpu_micros = clock_->CPUMicros();
   Status s;
 
-  SequenceNumber smallest_seqno = mems_.front()->GetEarliestSequenceNumber();   // ztorchan: 获取待Flush的MemTables中最早的序列号
+  SequenceNumber smallest_seqno = mems_.front()->GetEarliestSequenceNumber();
   if (!db_impl_seqno_time_mapping_.Empty()) {
     // make a local copy, as the seqno_time_mapping from db_impl is not thread
     // safe, which will be used while not holding the db_mutex.
-    seqno_to_time_mapping_ = db_impl_seqno_time_mapping_.Copy(smallest_seqno);  // ztorchan: 从全局的序列号向时间的有序映射表中，获取当前序列号之后的复制
+    seqno_to_time_mapping_ = db_impl_seqno_time_mapping_.Copy(smallest_seqno);
   }
 
   std::vector<BlobFileAddition> blob_file_additions;
 
   {
-    auto write_hint = cfd_->CalculateSSTWriteHint(0);                           // ztorchan: 计算Level0生命周期，传入BuildTable
+    auto write_hint = cfd_->CalculateSSTWriteHint(0);
     Env::IOPriority io_priority = GetRateLimiterPriorityForWrite();
     db_mutex_->Unlock();
     if (log_buffer_) {
@@ -855,7 +826,7 @@ Status FlushJob::WriteLevel0Table() {
     uint64_t mems_size = mems_.size();
     (void)mems_size;  // avoids unused variable error when
                       // TEST_SYNC_POINT_CALLBACK not used.
-    TEST_SYNC_POINT_CALLBACK("FlushJob::WriteLevel0Table:num_memtables",
+    TEST_SYNC_POINT_CALLBACK("FlushJobWithColdHotSeparation::WriteLevel0Table:num_memtables",
                              &mems_size);
     assert(job_context_);
     for (MemTable* m : mems_) {
@@ -889,11 +860,11 @@ Status FlushJob::WriteLevel0Table() {
           NewMergingIterator(&cfd_->internal_comparator(), memtables.data(),
                              static_cast<int>(memtables.size()), &arena));
       ROCKS_LOG_INFO(db_options_.info_log,
-                     "[%s] [JOB %d] Level-0 flush table #%" PRIu64 ": started",
+                     "[%s] [JOB %d] Level-0 flush table #%" PRIu64 "and #%" PRIu64 ": started",
                      cfd_->GetName().c_str(), job_context_->job_id,
-                     meta_.fd.GetNumber());
+                     cold_meta_.fd.GetNumber(), hot_meta_.fd.GetNumber());
 
-      TEST_SYNC_POINT_CALLBACK("FlushJob::WriteLevel0Table:output_compression",
+      TEST_SYNC_POINT_CALLBACK("FlushJobWithColdHotSeparation::WriteLevel0Table:output_compression",
                                &output_compression_);
       int64_t _current_time = 0;
       auto status = clock_->GetCurrentTime(&_current_time);
@@ -915,10 +886,12 @@ Status FlushJob::WriteLevel0Table() {
       uint64_t oldest_ancester_time = std::min(current_time, oldest_key_time);
 
       TEST_SYNC_POINT_CALLBACK(
-          "FlushJob::WriteLevel0Table:oldest_ancester_time",
+          "FlushJobWithColdHotSeparation::WriteLevel0Table:oldest_ancester_time",
           &oldest_ancester_time);
-      meta_.oldest_ancester_time = oldest_ancester_time;
-      meta_.file_creation_time = current_time;
+      cold_meta_.oldest_ancester_time = oldest_ancester_time;
+      cold_meta_.file_creation_time = current_time;
+      hot_meta_.oldest_ancester_time = oldest_ancester_time;
+      hot_meta_.file_creation_time = current_time;
 
       uint64_t num_input_entries = 0;
       uint64_t memtable_payload_bytes = 0;
@@ -934,20 +907,20 @@ Status FlushJob::WriteLevel0Table() {
           0 /* level */, false /* is_bottommost */,
           TableFileCreationReason::kFlush, oldest_key_time, current_time,
           db_id_, db_session_id_, 0 /* target_file_size */,
-          meta_.fd.GetNumber());
+          cold_meta_.fd.GetNumber(), hot_meta_.fd.GetNumber());
       const SequenceNumber job_snapshot_seq =
           job_context_->GetJobSnapshotSequence();
-      s = BuildTable(
+      s = BuildTableWithColdHotSeparation(
           dbname_, versions_, db_options_, tboptions, file_options_,
-          cfd_->table_cache(), iter.get(), std::move(range_del_iters), &meta_,
+          cfd_->table_cache(), iter.get(), std::move(range_del_iters), &cold_meta_, &hot_meta_,
           &blob_file_additions, existing_snapshots_,
           earliest_write_conflict_snapshot_, job_snapshot_seq,
           snapshot_checker_, mutable_cf_options_.paranoid_file_checks,
           cfd_->internal_stats(), &io_s, io_tracer_,
           BlobFileCreationReason::kFlush, seqno_to_time_mapping_, event_logger_,
-          job_context_->job_id, io_priority, &table_properties_, write_hint,
+          job_context_->job_id, io_priority, &cold_table_properties_, &hot_table_properties_, write_hint,
           full_history_ts_low, blob_callback_, &num_input_entries,
-          &memtable_payload_bytes, &memtable_garbage_bytes);
+          &memtable_payload_bytes, &memtable_garbage_bytes, cfd_->GetHotTable());
       // TODO: Cleanup io_status in BuildTable and table builders
       assert(!s.ok() || io_s.ok());
       io_s.PermitUncheckedError();
@@ -963,7 +936,7 @@ Status FlushJob::WriteLevel0Table() {
         }
       }
       if (tboptions.reason == TableFileCreationReason::kFlush) {
-        TEST_SYNC_POINT("DBImpl::FlushJob:Flush");
+        TEST_SYNC_POINT("DBImpl::FlushJobWithColdHotSeparation:Flush");
         RecordTick(stats_, MEMTABLE_PAYLOAD_BYTES_AT_FLUSH,
                    memtable_payload_bytes);
         RecordTick(stats_, MEMTABLE_GARBAGE_BYTES_AT_FLUSH,
@@ -976,44 +949,71 @@ Status FlushJob::WriteLevel0Table() {
                      " bytes %s"
                      "%s",
                      cfd_->GetName().c_str(), job_context_->job_id,
-                     meta_.fd.GetNumber(), meta_.fd.GetFileSize(),
+                     cold_meta_.fd.GetNumber(), cold_meta_.fd.GetFileSize(),
                      s.ToString().c_str(),
-                     meta_.marked_for_compaction ? " (needs compaction)" : "");
+                     cold_meta_.marked_for_compaction ? " (needs compaction)" : "");
+    ROCKS_LOG_BUFFER(log_buffer_,
+                     "[%s] [JOB %d] Level-0 flush table #%" PRIu64 ": %" PRIu64
+                     " bytes %s"
+                     "%s",
+                     cfd_->GetName().c_str(), job_context_->job_id,
+                     hot_meta_.fd.GetNumber(), hot_meta_.fd.GetFileSize(),
+                     s.ToString().c_str(),
+                     hot_meta_.marked_for_compaction ? " (needs compaction)" : "");
 
     if (s.ok() && output_file_directory_ != nullptr && sync_output_directory_) {
       s = output_file_directory_->FsyncWithDirOptions(
           IOOptions(), nullptr,
           DirFsyncOptions(DirFsyncOptions::FsyncReason::kNewFileSynced));
     }
-    TEST_SYNC_POINT_CALLBACK("FlushJob::WriteLevel0Table", &mems_);
+    TEST_SYNC_POINT_CALLBACK("FlushJobWithColdHotSeparation::WriteLevel0Table", &mems_);
     db_mutex_->Lock();
   }
   base_->Unref();
 
   // Note that if file_size is zero, the file has been deleted and
   // should not be added to the manifest.
-  const bool has_output = meta_.fd.GetFileSize() > 0;
+  const bool cold_has_output = cold_meta_.fd.GetFileSize() > 0;
+  const bool hot_has_output = hot_meta_.fd.GetFileSize() > 0;
 
-  if (s.ok() && has_output) {
-    TEST_SYNC_POINT("DBImpl::FlushJob:SSTFileCreated");
+  if (s.ok() && cold_has_output) {
+    TEST_SYNC_POINT("DBImpl::FlushJobWithColdHotSeparation:SSTFileCreated");
     // if we have more than 1 background thread, then we cannot
     // insert files directly into higher levels because some other
     // threads could be concurrently producing compacted files for
     // that key range.
     // Add file to L0
-    edit_->AddFile(0 /* level */, meta_.fd.GetNumber(), meta_.fd.GetPathId(),
-                   meta_.fd.GetFileSize(), meta_.smallest, meta_.largest,
-                   meta_.fd.smallest_seqno, meta_.fd.largest_seqno,
-                   meta_.marked_for_compaction, meta_.temperature,
-                   meta_.oldest_blob_file_number, meta_.oldest_ancester_time,
-                   meta_.file_creation_time, meta_.file_checksum,
-                   meta_.file_checksum_func_name, meta_.unique_id);
+    edit_->AddFile(0 /* level */, cold_meta_.fd.GetNumber(), cold_meta_.fd.GetPathId(),
+                   cold_meta_.fd.GetFileSize(), cold_meta_.smallest, cold_meta_.largest,
+                   cold_meta_.fd.smallest_seqno, cold_meta_.fd.largest_seqno,
+                   cold_meta_.marked_for_compaction, cold_meta_.temperature,
+                   cold_meta_.oldest_blob_file_number, cold_meta_.oldest_ancester_time,
+                   cold_meta_.file_creation_time, cold_meta_.file_checksum,
+                   cold_meta_.file_checksum_func_name, cold_meta_.unique_id);
+
+    edit_->SetBlobFileAdditions(std::move(blob_file_additions));
+  }
+  if (s.ok() && hot_has_output) {
+    TEST_SYNC_POINT("DBImpl::FlushJobWithColdHotSeparation:SSTFileCreated");
+    // if we have more than 1 background thread, then we cannot
+    // insert files directly into higher levels because some other
+    // threads could be concurrently producing compacted files for
+    // that key range.
+    // Add file to L0
+    edit_->AddFile(0 /* level */, hot_meta_.fd.GetNumber(), hot_meta_.fd.GetPathId(),
+                   hot_meta_.fd.GetFileSize(), hot_meta_.smallest, hot_meta_.largest,
+                   hot_meta_.fd.smallest_seqno, hot_meta_.fd.largest_seqno,
+                   hot_meta_.marked_for_compaction, hot_meta_.temperature,
+                   hot_meta_.oldest_blob_file_number, hot_meta_.oldest_ancester_time,
+                   hot_meta_.file_creation_time, hot_meta_.file_checksum,
+                   hot_meta_.file_checksum_func_name, hot_meta_.unique_id);
 
     edit_->SetBlobFileAdditions(std::move(blob_file_additions));
   }
 #ifndef ROCKSDB_LITE
   // Piggyback FlushJobInfo on the first first flushed memtable.
-  mems_[0]->SetFlushJobInfo(GetFlushJobInfo());
+  mems_[0]->SetFlushJobColdInfo(GetFlushJobColdInfo());
+  mems_[0]->SetFlushJobHotInfo(GetFlushJobHotInfo());
 #endif  // !ROCKSDB_LITE
 
   // Note that here we treat flush as level 0 compaction in internal stats
@@ -1022,6 +1022,8 @@ Status FlushJob::WriteLevel0Table() {
   const uint64_t cpu_micros = clock_->CPUMicros() - start_cpu_micros;
   stats.micros = micros;
   stats.cpu_micros = cpu_micros;
+  stats.bytes_written = 0;
+  stats.num_output_file = 0;
 
   ROCKS_LOG_INFO(db_options_.info_log,
                  "[%s] [JOB %d] Flush lasted %" PRIu64
@@ -1029,9 +1031,13 @@ Status FlushJob::WriteLevel0Table() {
                  cfd_->GetName().c_str(), job_context_->job_id, micros,
                  cpu_micros);
 
-  if (has_output) {
-    stats.bytes_written = meta_.fd.GetFileSize();
-    stats.num_output_files = 1;
+  if (cold_has_output) {
+    stats.bytes_written += cold_meta_.fd.GetFileSize();
+    stats.num_output_files += 1;
+  }
+  if (hot_has_output) {
+    stats.bytes_written += hot_meta_.fd.GetFileSize();
+    stats.num_output_files += 1;
   }
 
   const auto& blobs = edit_->GetBlobFileAdditions();
@@ -1051,7 +1057,7 @@ Status FlushJob::WriteLevel0Table() {
   return s;
 }
 
-Env::IOPriority FlushJob::GetRateLimiterPriorityForWrite() {
+Env::IOPriority FlushJobWithColdHotSeparation::GetRateLimiterPriorityForWrite() {
   if (versions_ && versions_->GetColumnFamilySet() &&
       versions_->GetColumnFamilySet()->write_controller()) {
     WriteController* write_controller =
@@ -1065,21 +1071,53 @@ Env::IOPriority FlushJob::GetRateLimiterPriorityForWrite() {
 }
 
 #ifndef ROCKSDB_LITE
-std::unique_ptr<FlushJobInfo> FlushJob::GetFlushJobInfo() const {
+std::unique_ptr<FlushJobInfo> FlushJobWithColdHotSeparation::GetFlushJobColdInfo() const {
   db_mutex_->AssertHeld();
   std::unique_ptr<FlushJobInfo> info(new FlushJobInfo{});
   info->cf_id = cfd_->GetID();
   info->cf_name = cfd_->GetName();
 
-  const uint64_t file_number = meta_.fd.GetNumber();
+  const uint64_t file_number = cold_meta_.fd.GetNumber();
   info->file_path =
       MakeTableFileName(cfd_->ioptions()->cf_paths[0].path, file_number);
   info->file_number = file_number;
-  info->oldest_blob_file_number = meta_.oldest_blob_file_number;
+  info->oldest_blob_file_number = cold_meta_.oldest_blob_file_number;
   info->thread_id = db_options_.env->GetThreadID();
   info->job_id = job_context_->job_id;
-  info->smallest_seqno = meta_.fd.smallest_seqno;
-  info->largest_seqno = meta_.fd.largest_seqno;
+  info->smallest_seqno = cold_meta_.fd.smallest_seqno;
+  info->largest_seqno = cold_meta_.fd.largest_seqno;
+  info->table_properties = table_properties_;
+  info->flush_reason = cfd_->GetFlushReason();
+  info->blob_compression_type = mutable_cf_options_.blob_compression_type;
+
+  // Update BlobFilesInfo.
+  for (const auto& blob_file : edit_->GetBlobFileAdditions()) {
+    BlobFileAdditionInfo blob_file_addition_info(
+        BlobFileName(cfd_->ioptions()->cf_paths.front().path,
+                     blob_file.GetBlobFileNumber()) /*blob_file_path*/,
+        blob_file.GetBlobFileNumber(), blob_file.GetTotalBlobCount(),
+        blob_file.GetTotalBlobBytes());
+    info->blob_file_addition_infos.emplace_back(
+        std::move(blob_file_addition_info));
+  }
+  return info;
+}
+
+std::unique_ptr<FlushJobInfo> FlushJobWithColdHotSeparation::GetFlushJobHotInfo() const {
+  db_mutex_->AssertHeld();
+  std::unique_ptr<FlushJobInfo> info(new FlushJobInfo{});
+  info->cf_id = cfd_->GetID();
+  info->cf_name = cfd_->GetName();
+
+  const uint64_t file_number = hot_meta_.fd.GetNumber();
+  info->file_path =
+      MakeTableFileName(cfd_->ioptions()->cf_paths[0].path, file_number);
+  info->file_number = file_number;
+  info->oldest_blob_file_number = hot_meta_.oldest_blob_file_number;
+  info->thread_id = db_options_.env->GetThreadID();
+  info->job_id = job_context_->job_id;
+  info->smallest_seqno = hot_meta_.fd.smallest_seqno;
+  info->largest_seqno = hot_meta_.fd.largest_seqno;
   info->table_properties = table_properties_;
   info->flush_reason = cfd_->GetFlushReason();
   info->blob_compression_type = mutable_cf_options_.blob_compression_type;

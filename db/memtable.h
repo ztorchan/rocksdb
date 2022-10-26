@@ -506,8 +506,24 @@ class MemTable {
     flush_job_info_ = std::move(info);
   }
 
+  void SetFlushJobColdInfo(std::unique_ptr<FlushJobInfo>&& info) {
+    flush_job_cold_info = std::move(info);
+  }
+
+  void SetFlushJobHotInfo(std::unique_ptr<FlushJobInfo>&& info) {
+    flush_job_hot_info = std::move(info);
+  }
+
   std::unique_ptr<FlushJobInfo> ReleaseFlushJobInfo() {
     return std::move(flush_job_info_);
+  }
+
+  std::unique_ptr<FlushJobInfo> ReleaseFlushJobColdInfo() {
+    return std::move(flush_job_cold_info);
+  }
+
+  std::unique_ptr<FlushJobInfo> ReleaseFlushJobHotInfo() {
+    return std::move(flush_job_hot_info);
   }
 #endif  // !ROCKSDB_LITE
 
@@ -621,6 +637,8 @@ class MemTable {
 #ifndef ROCKSDB_LITE
   // Flush job info of the current memtable.
   std::unique_ptr<FlushJobInfo> flush_job_info_;
+  std::unique_ptr<FlushJobInfo> flush_job_cold_info;
+  std::unique_ptr<FlushJobInfo> flush_job_hot_info;
 #endif  // !ROCKSDB_LITE
 
   // Updates flush_state_ using ShouldFlushNow()

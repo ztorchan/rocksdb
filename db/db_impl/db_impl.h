@@ -1821,7 +1821,7 @@ class DBImpl : public DB {
       SnapshotChecker* snapshot_checker, LogBuffer* log_buffer,
       Env::Priority thread_pri);
 
-  Status FlushMemTableToOutputFileWithHotColdSeparation(
+  Status FlushMemTableToOutputFileWithColdHotSeparation(
       ColumnFamilyData* cfd, const MutableCFOptions& mutable_cf_options,
       bool* madeProgress, JobContext* job_context,
       SuperVersionContext* superversion_context,
@@ -2684,8 +2684,6 @@ class DBImpl : public DB {
   // seqno_time_mapping_ stores the sequence number to time mapping, it's not
   // thread safe, both read and write need db mutex hold.
   SeqnoToTimeMapping seqno_time_mapping_;
-
-  HotTable* hot_table_;
 };
 
 class GetWithTimestampReadCallback : public ReadCallback {
