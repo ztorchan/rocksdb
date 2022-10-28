@@ -583,7 +583,7 @@ ColumnFamilyData::ColumnFamilyData(
     }
     if (cf_options.hot_table_threhold != 0) {
       hot_table_ = new HotTable(cf_options.hot_table_threhold, cf_options.cnter_per_key);
-      assert(hot_table_ == nullptr);
+      assert(hot_table_ != nullptr);
     }
   }
   Ref();

@@ -2146,7 +2146,7 @@ Status DBImpl::GetImpl(const ReadOptions& read_options, const Slice& key,
     RecordTick(stats_, MEMTABLE_MISS);
   }
 
-  if(s.ok()) {
+  if(s.ok() && sv->cfd->GetHotTable() != nullptr) {
     sv->cfd->GetHotTable()->AddKey(key);
   }
 

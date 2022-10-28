@@ -2099,7 +2099,9 @@ class MemTableInserter : public WriteBatch::Handler {
       const bool kBatchBoundary = true;
       MaybeAdvanceSeq(kBatchBoundary);
     } else if (ret_status.ok()) {
-      cf_mems_->current()->GetHotTable()->AddKey(key);
+      if (cf_mems_->current()->GetHotTable() != nullptr) {
+        cf_mems_->current()->GetHotTable()->AddKey(key);
+      }
       MaybeAdvanceSeq();
       CheckMemtableFull();
     }
@@ -2207,7 +2209,6 @@ class MemTableInserter : public WriteBatch::Handler {
         }
       } else if (ret_status.ok()) {
         MaybeAdvanceSeq(false /* batch_boundary */);
-        cf_mems_->current()->GetHotTable()->AddKey(key);
       }
       if (UNLIKELY(ret_status.IsTryAgain())) {
         DecrementProtectionInfoIdxForTryAgain();
@@ -2273,7 +2274,6 @@ class MemTableInserter : public WriteBatch::Handler {
         }
       } else if (ret_status.ok()) {
         MaybeAdvanceSeq(false /* batch_boundary */);
-        cf_mems_->current()->GetHotTable()->AddKey(key);
       }
       if (UNLIKELY(ret_status.IsTryAgain())) {
         DecrementProtectionInfoIdxForTryAgain();
